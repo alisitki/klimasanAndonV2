@@ -40,26 +40,20 @@ shift_state_t shift_state = SHIFT_RUNNING;
 // WORK dışındaki modlarda çalışır, WORK'e geçince donar
 
 static void start_durus_timer(void) {
-    if (!sys_data.durus_running) {
-        sys_data.durus_start_epoch = rtc_get_wall_time_seconds();
-        sys_data.durus_running = true;
-        sys_data.durus_time = 0;
-        ESP_LOGI(TAG, "Duruş timer started");
-    }
+    sys_data.durus_running = true;
+    ESP_LOGI(TAG, "Duruş timer started");
 }
 
 static void stop_durus_timer(void) {
     if (sys_data.durus_running) {
-        uint32_t now = rtc_get_wall_time_seconds();
-        sys_data.durus_time = now - sys_data.durus_start_epoch;
         sys_data.durus_running = false;
-        ESP_LOGI(TAG, "Duruş timer stopped: %lu sec (frozen)", sys_data.durus_time);
+        ESP_LOGI(TAG, "Duruş timer stopped: %lu sec (frozen)", (unsigned long)sys_data.durus_time);
     }
 }
 
 static void update_durus_timer(void) {
     if (sys_data.durus_running) {
-        sys_data.durus_time++;  // Basit artış, planned_time ile senkron
+        sys_data.durus_time++;  // Basit artış, jump engeller
     }
 }
 
@@ -75,6 +69,7 @@ static void switch_to_work_mode(void) {
     stop_durus_timer();
     
     current_mode = MODE_WORK;
+    led_strip_clear(); // WORK'e geçince LED barı söndür (adet gelince başlayacak)
     ESP_LOGI(TAG, "🟢 MODE: WORK (Çalışma zamanı sayılıyor)");
     nvs_storage_save_state_immediate();
     andon_display_update();
@@ -126,8 +121,8 @@ static void timer_task(void *pvParameters) {
             continue;
         }
         
-        // Sayaçlar aktif değilse (buton basılmamış) sadece display güncelle
-        if (!sys_data.counting_active) {
+        // Sayaçlar aktif değilse (veya saat ayarı modundaysak) sadece display güncelle
+        if (!sys_data.counting_active || sys_data.clock_step > 0) {
             andon_display_update();
             continue;
         }
@@ -184,7 +179,7 @@ static void on_button_event(button_event_t event) {
             if (current_mode == MODE_WORK) {
                 sys_data.produced_count++;
                 ESP_LOGI(TAG, "🟠 Adet: %lu / %lu", 
-                         sys_data.produced_count, sys_data.target_count);
+                         (unsigned long)sys_data.produced_count, (unsigned long)sys_data.target_count);
                 
                 // Cycle bar'ı başlat/sıfırla
                 led_strip_start_cycle();
@@ -240,26 +235,38 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     ir_input_mode_t input_mode = ir_remote_get_input_mode();
     
     // Rakam girişi modunda
-    if (input_mode != IR_INPUT_NONE) {
-        int8_t digit = decode_ir_digit(address, command);
-        if (digit >= 0) {
-            // Rakam ekle
-            uint32_t val = ir_remote_get_input_value();
-            val = (val % 1000) * 10 + digit;
-            
-            if (input_mode == IR_INPUT_TARGET) {
-                sys_data.target_count = val;
-                nvs_storage_save_target(val);
-                ESP_LOGI(TAG, "Hedef Adet: %lu", val);
-            } else if (input_mode == IR_INPUT_CYCLE_TIME) {
-                led_strip_set_cycle_target(val);
-                nvs_storage_save_cycle_target(val);
-                ESP_LOGI(TAG, "Cycle Target: %lu sec", val);
+    int8_t digit = decode_ir_digit(address, command);
+    if (digit >= 0 && sys_data.screen_on) {
+        if (input_mode == IR_INPUT_CLOCK) {
+            // SAAT AYARI MODU
+            if (sys_data.clock_step == 1) {
+                // Saat hanesi
+                sys_data.clock_hours = (sys_data.clock_hours % 10) * 10 + digit;
+                if (sys_data.clock_hours > 23) sys_data.clock_hours = 23;
+                ESP_LOGI(TAG, "Clock Entry: Hour = %02d", sys_data.clock_hours);
+            } else if (sys_data.clock_step == 2) {
+                // Dakika hanesi
+                sys_data.clock_minutes = (sys_data.clock_minutes % 10) * 10 + digit;
+                if (sys_data.clock_minutes > 59) sys_data.clock_minutes = 59;
+                ESP_LOGI(TAG, "Clock Entry: Minute = %02d", sys_data.clock_minutes);
             }
-            
-            andon_display_update();
-            return;
+        } else if (input_mode == IR_INPUT_CYCLE_TIME) {
+            // Cycle Süresi modundayken buraya girer
+            uint32_t val = led_strip_get_cycle_target();
+            val = (val % 1000) * 10 + digit;
+            led_strip_set_cycle_target(val);
+            nvs_storage_save_cycle_target(val);
+            ESP_LOGI(TAG, "Cycle Target: %lu sec", (unsigned long)val);
+        } else {
+            // Standart: Hedef Adet'i güncelle
+            uint32_t val = sys_data.target_count;
+            val = (val % 1000) * 10 + digit;
+            sys_data.target_count = val;
+            nvs_storage_save_target(val);
+            ESP_LOGI(TAG, "Hedef Adet (Hızlı Giriş): %lu", (unsigned long)val);
         }
+        andon_display_update();
+        return;
     }
     
     // === Özel Komutlar ===
@@ -271,6 +278,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
             // Ekranı KAPAT
             sys_data.screen_on = false;
             sys_data.counting_active = false;
+            led_strip_clear(); // Ekran kapanınca LED barı da söndür
             ESP_LOGI(TAG, "📴 EKRAN KAPANDI");
         } else {
             // Ekranı AÇ - tüm değerler sıfırlanır, hiçbir süre saymaz
@@ -288,7 +296,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
             sys_data.target_count = nvs_storage_load_target();
             
             led_strip_clear();
-            ESP_LOGI(TAG, "📱 EKRAN AÇILDI - Hedef: %lu (sayaçlar beklemede)", sys_data.target_count);
+            ESP_LOGI(TAG, "📱 EKRAN AÇILDI - Hedef: %lu (sayaçlar beklemede)", (unsigned long)sys_data.target_count);
         }
         nvs_storage_save_state_immediate();
         andon_display_update();
@@ -328,7 +336,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         if (current_mode == MODE_WORK) {
             sys_data.produced_count++;
             ESP_LOGI(TAG, "IR: Mavi → Adet: %lu / %lu", 
-                     sys_data.produced_count, sys_data.target_count);
+                     (unsigned long)sys_data.produced_count, (unsigned long)sys_data.target_count);
             led_strip_start_cycle();
             nvs_storage_save_state();
             andon_display_update();
@@ -341,12 +349,13 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     // ========== DİĞER KOMUTLAR ==========
     
     // Hedef Sıfırlama (0xFE address)
-    if (address == 0xFE) {
+    // MUTE / SIFIRLA (0xFF, 0x02 veya 0xFE adresi)
+    if ((address == 0xFF && command == 0x02) || (address == 0xFE)) {
         sys_data.target_count = 0;
         nvs_storage_save_target(0);
         ir_remote_set_input_mode(IR_INPUT_NONE);
         andon_display_update();
-        ESP_LOGI(TAG, "IR: Hedef sıfırlandı");
+        ESP_LOGI(TAG, "IR: MUTE → Hedef sıfırlandı");
         return;
     }
     
@@ -386,7 +395,40 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         return;
     }
     
-    // Hedef Adet Girme Modu
+    // Saat Ayarı Modu (FKB / 0xFB, 0x1D)
+    if (address == 0xFB && command == 0x1D) {
+        if (sys_data.clock_step == 0) {
+            // Modu başlat: Saat adımına geç
+            ir_remote_set_input_mode(IR_INPUT_CLOCK);
+            sys_data.clock_step = 1;
+            
+            // Mevcut zamanı al
+            struct tm tm_now;
+            if (rtc_ds1307_read_tm(&tm_now) != ESP_OK) {
+                time_t now = time(NULL);
+                struct tm *tm_local = localtime(&now);
+                tm_now = *tm_local;
+            }
+            sys_data.clock_hours = tm_now.tm_hour;
+            sys_data.clock_minutes = tm_now.tm_min;
+            sys_data.clock_blink_on = true;
+            ESP_LOGI(TAG, "IR: Saat Ayarı Modu Başladı (Saat Adımı)");
+        } else if (sys_data.clock_step == 1) {
+            // Saat bitti, dakikaya geç
+            sys_data.clock_step = 2;
+            ESP_LOGI(TAG, "IR: Saat Ayarı (Dakika Adımı)");
+        } else {
+            // Dakika da bitti, Kaydet ve Çık
+            rtc_ds1307_set_time(sys_data.clock_hours, sys_data.clock_minutes);
+            sys_data.clock_step = 0;
+            ir_remote_set_input_mode(IR_INPUT_NONE);
+            ESP_LOGI(TAG, "IR: Saat Ayarı Kaydedildi ve Çıkıldı");
+        }
+        andon_display_update();
+        return;
+    }
+
+    // Hedef Adet Girme Modu (Manuel)
     if ((address == 0xFF && command == 0xD0) || (address == 0xD0)) {
         ir_remote_set_input_mode(IR_INPUT_TARGET);
         ESP_LOGI(TAG, "IR: Hedef adet giriş modu");
@@ -402,8 +444,20 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     
     // Giriş modundan çık (OK tuşu)
     if ((address == 0xFF && command == 0xF0) || (address == 0xF0)) {
-        ir_remote_set_input_mode(IR_INPUT_NONE);
-        ESP_LOGI(TAG, "IR: Giriş modu kapatıldı");
+        if (sys_data.clock_step > 0) {
+            // Saat ayarındaysak OK'e basınca bir sonraki adıma geçer veya kaydeder
+            if (sys_data.clock_step == 1) {
+                sys_data.clock_step = 2;
+            } else {
+                rtc_ds1307_set_time(sys_data.clock_hours, sys_data.clock_minutes);
+                sys_data.clock_step = 0;
+                ir_remote_set_input_mode(IR_INPUT_NONE);
+            }
+        } else {
+            ir_remote_set_input_mode(IR_INPUT_NONE);
+        }
+        andon_display_update();
+        ESP_LOGI(TAG, "IR: Giriş/Ayar modu kapatıldı");
         return;
     }
 }
@@ -440,7 +494,7 @@ static void power_on_recovery(void) {
             uint32_t offline = now - last.last_upd;
             if (offline < 86400) {  // Max 24 saat
                 sys_data.work_time += offline;
-                ESP_LOGI(TAG, "⏱️ Offline: %lu sec → work_time += %lu", offline, offline);
+                ESP_LOGI(TAG, "⏱️ Offline: %lu sec → work_time += %lu", (unsigned long)offline, (unsigned long)offline);
             }
         }
         ESP_LOGI(TAG, "🔄 RECOVERY: MODE_WORK continues");

@@ -23,6 +23,7 @@ typedef enum {
     IR_INPUT_TARGET,        // Hedef adet girişi
     IR_INPUT_CYCLE_TIME,    // Cycle süresi girişi
     IR_INPUT_PIN,           // Yetkili PIN girişi
+    IR_INPUT_CLOCK,         // Saat ayarı modu
 } ir_input_mode_t;
 
 /**

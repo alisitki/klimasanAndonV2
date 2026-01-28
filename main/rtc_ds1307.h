@@ -5,6 +5,7 @@
 #ifndef RTC_DS1307_H
 #define RTC_DS1307_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
 #include "esp_err.h"
@@ -41,5 +42,13 @@ esp_err_t rtc_ds1307_read_tm(struct tm *out);
  * @return Epoch saniye
  */
 uint32_t rtc_get_wall_time_seconds(void);
+
+/**
+ * @brief RTC zamanını ayarla
+ * @param hours Saat (0-23)
+ * @param minutes Dakika (0-59)
+ * @return ESP_OK başarılı
+ */
+esp_err_t rtc_ds1307_set_time(uint8_t hours, uint8_t minutes);
 
 #endif // RTC_DS1307_H

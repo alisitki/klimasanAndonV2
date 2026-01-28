@@ -49,6 +49,12 @@ typedef struct {
     // Ekran durumu
     bool screen_on;             // Ekran açık/kapalı
     bool counting_active;       // Sayaçlar aktif mi (buton basılınca true)
+    
+    // Saat ayarı modu yardımcıları
+    uint8_t clock_step;         // 0: mod kapalı, 1: saat seçili, 2: dakika seçili
+    uint8_t clock_hours;
+    uint8_t clock_minutes;
+    bool clock_blink_on;        // Yan-sön durumu
 } system_data_t;
 
 // ============ NVS Backup Yapısı ============

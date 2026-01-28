@@ -16,7 +16,7 @@
  */
 #include <stdint.h>
 #include <stdbool.h>
-#include <time.h>
+#include <string.h>
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "driver/gpio.h"
@@ -110,6 +110,11 @@ static void verim_to_2digits(uint32_t verim, uint8_t out[2]) {
     verim = verim % 100;  // Max 99
     out[0] = verim % 10;
     out[1] = verim / 10;
+    
+    // Eğer onlar basamağı 0 ise kapat (blank)
+    if (out[1] == 0) {
+        out[1] = DISPLAY_BLANK;
+    }
 }
 
 // ============ Update scan data from system values ============
@@ -125,23 +130,46 @@ void andon_display_update(void) {
     
     // LD1: SAAT - RTC'den al
     struct tm tm_now;
-    if (rtc_ds1307_read_tm(&tm_now) == ESP_OK) {
-        saat[0] = tm_now.tm_sec % 10;
-        saat[1] = tm_now.tm_sec / 10;
-        saat[2] = tm_now.tm_min % 10;
-        saat[3] = tm_now.tm_min / 10;
-        saat[4] = tm_now.tm_hour % 10;
-        saat[5] = tm_now.tm_hour / 10;
+    if (sys_data.clock_step == 0) {
+        if (rtc_ds1307_read_tm(&tm_now) == ESP_OK) {
+            saat[0] = tm_now.tm_sec % 10;
+            saat[1] = tm_now.tm_sec / 10;
+            saat[2] = tm_now.tm_min % 10;
+            saat[3] = tm_now.tm_min / 10;
+            saat[4] = tm_now.tm_hour % 10;
+            saat[5] = tm_now.tm_hour / 10;
+        } else {
+            time_t now = time(NULL);
+            struct tm *tm_local = localtime(&now);
+            saat[0] = tm_local->tm_sec % 10;
+            saat[1] = tm_local->tm_sec / 10;
+            saat[2] = tm_local->tm_min % 10;
+            saat[3] = tm_local->tm_min / 10;
+            saat[4] = tm_local->tm_hour % 10;
+            saat[5] = tm_local->tm_hour / 10;
+        }
     } else {
-        // RTC yok, sistem zamanı
-        time_t now = time(NULL);
-        struct tm *tm_local = localtime(&now);
-        saat[0] = tm_local->tm_sec % 10;
-        saat[1] = tm_local->tm_sec / 10;
-        saat[2] = tm_local->tm_min % 10;
-        saat[3] = tm_local->tm_min / 10;
-        saat[4] = tm_local->tm_hour % 10;
-        saat[5] = tm_local->tm_hour / 10;
+        // SAAT AYARI MODU - HH:MM:00
+        saat[0] = 0; // Saniye her zaman 0
+        saat[1] = 0;
+        
+        // Dakika Haneleri
+        if (sys_data.clock_step == 2 && !sys_data.clock_blink_on) {
+            saat[2] = DISPLAY_BLANK;
+            saat[3] = DISPLAY_BLANK;
+        } else {
+            saat[2] = sys_data.clock_minutes % 10;
+            saat[3] = sys_data.clock_minutes / 10;
+        }
+        
+        // Saat Haneleri
+        if (sys_data.clock_step == 1 && !sys_data.clock_blink_on) {
+            saat[4] = DISPLAY_BLANK;
+            saat[5] = DISPLAY_BLANK;
+        } else {
+            saat[4] = sys_data.clock_hours % 10;
+            saat[5] = sys_data.clock_hours / 10;
+        }
     }
     
     // LD2: DURUŞ SÜRESİ (MM:SS)
@@ -171,6 +199,9 @@ void andon_display_update(void) {
     verim_to_2digits(verim_val, verim);
     
     // Write to WRITE buffer (display reads from ACTIVE buffer)
+    // Önce write buffer'ı temizle (Ghosting veya eski verileri engellemek için)
+    memset(SCAN_DATA_WRITE, DISPLAY_BLANK, sizeof(SCAN_DATA_WRITE));
+    
     // Her tarama (0-5) bir hane pozisyonu
     // Tarama 0 = en sağ (birler), Tarama 5 = en sol (yüzler/onlar)
     for (int scan = 0; scan < 6; scan++) {
@@ -268,11 +299,11 @@ static void display_scan_task(void *pvParameters) {
             andon_display_select_hane(scan);
             
             // 3. BEKLE: Bu tarama'da kal
-            esp_rom_delay_us(1000);  // 1.5ms per scan
+            esp_rom_delay_us(1200);  // 1.5ms per scan
             
             // 4. KAPAT: Taramayı kapat
             andon_display_select_hane(7);  // 7 = all off
-            esp_rom_delay_us(1);
+            esp_rom_delay_us(5);
         }
     
         // CPU'ya nefes

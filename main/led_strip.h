@@ -17,7 +17,7 @@
 
 // ============ Varsayılan Değerler ============
 #define DEFAULT_CYCLE_TARGET_SEC    60      // Varsayılan cycle süresi (saniye)
-#define FRAME_MS                    20      // Render periyodu (ms)
+#define FRAME_MS                    33      // Render periyodu (30 FPS - Flicker engellemek için)
 
 // ============ Fonksiyonlar ============
 

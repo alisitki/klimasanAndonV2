@@ -74,6 +74,10 @@ static uint8_t bcd_to_bin(uint8_t value) {
     return ((value >> 4) * 10U) + (value & 0x0FU);
 }
 
+static uint8_t bin_to_bcd(uint8_t value) {
+    return ((value / 10U) << 4) | (value % 10U);
+}
+
 // ============ Public Functions ============
 
 esp_err_t rtc_ds1307_init(void) {
@@ -206,4 +210,22 @@ uint32_t rtc_get_wall_time_seconds(void) {
     }
     epoch = time(NULL);
     return (uint32_t)epoch;
+}
+
+esp_err_t rtc_ds1307_set_time(uint8_t hours, uint8_t minutes) {
+    if (hours > 23 || minutes > 59) return ESP_ERR_INVALID_ARG;
+    
+    // Sadece saat ve dakikayı güncelliyoruz, saniyeyi 00 yapıyoruz
+    esp_err_t ret;
+    ret = ds1307_write_register(0x00, 0x00); // Seconds = 00, CH = 0
+    if (ret != ESP_OK) return ret;
+    
+    ret = ds1307_write_register(0x01, bin_to_bcd(minutes));
+    if (ret != ESP_OK) return ret;
+    
+    ret = ds1307_write_register(0x02, bin_to_bcd(hours)); // 24-hour mode implicit
+    if (ret != ESP_OK) return ret;
+    
+    ESP_LOGI(TAG, "RTC time set to %02d:%02d", hours, minutes);
+    return ESP_OK;
 }

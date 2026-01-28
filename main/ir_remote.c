@@ -96,7 +96,6 @@ static void ir_rx_task(void *pvParameters) {
                     ir_bit_count++;
                     
                     if (ir_bit_count == 32) {
-                        ESP_LOGI(TAG, "CODE: 0x%08X", (unsigned int)ir_data);
                         ir_parse_nec_code(ir_data);
                         ir_bit_count = 0;
                         ir_data = 0;
