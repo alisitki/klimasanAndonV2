@@ -54,6 +54,10 @@ static volatile uint32_t g_frame_counter = 0;
 static volatile bool g_cycle_running = false;
 static volatile bool g_alarm_active = false;
 static volatile bool g_alarm_acknowledged = false;
+static bool g_menu_preview = false;
+
+// Parlaklık kademeleri (1-5)
+static const float brightness_levels[] = {0.0f, 0.05f, 0.15f, 0.35f, 0.65f, 1.0f};
 
 // ============ Helper Functions ============
 
@@ -123,15 +127,15 @@ static void buzzer_init(void) {
         .mode = GPIO_MODE_OUTPUT,
     };
     gpio_config(&io_conf);
-    gpio_set_level(BUZZER_PIN, 0);
+    gpio_set_level(BUZZER_PIN, 0); // Start with LOW (SILENT)
 }
 
 static void buzzer_on(void) {
-    gpio_set_level(BUZZER_PIN, 1);
+    gpio_set_level(BUZZER_PIN, 1); // HIGH = ON
 }
 
 static void buzzer_off(void) {
-    gpio_set_level(BUZZER_PIN, 0);
+    gpio_set_level(BUZZER_PIN, 0); // LOW = OFF
 }
 
 // ============ Cycle Task ============
@@ -145,7 +149,11 @@ static void led_strip_task(void *arg) {
     ESP_LOGI(TAG, "LED task started (Core 1, 30 FPS)");
 
     while (1) {
-        if (g_cycle_running) {
+        if (g_menu_preview) {
+            render_cycle_bar(1.0f);
+            transmit_leds();
+            last_running = true;
+        } else if (g_cycle_running) {
             // Sadece WORK modunda sayaç ilerler
             if (current_mode == MODE_WORK) {
                 last_running = true;
@@ -259,7 +267,7 @@ void led_strip_start_cycle(void) {
     g_cycle_running = true;
     g_alarm_active = false;
     g_alarm_acknowledged = false;
-    ESP_LOGI(TAG, "Cycle started (%lu sec)", g_cycle_target_sec);
+    ESP_LOGI(TAG, "Cycle started (%lu sec)", (unsigned long)g_cycle_target_sec);
 }
 
 void led_strip_set_cycle_target(uint32_t seconds) {
@@ -283,5 +291,16 @@ void led_strip_acknowledge_alarm(void) {
 
 void led_strip_clear(void) {
     g_cycle_running = false;
+    g_menu_preview = false;
     buzzer_off();
+}
+
+void led_strip_set_menu_preview(bool active) {
+    g_menu_preview = active;
+}
+
+void led_strip_set_brightness_idx(uint8_t index) {
+    if (index >= 1 && index <= 5) {
+        g_brightness = brightness_levels[index];
+    }
 }

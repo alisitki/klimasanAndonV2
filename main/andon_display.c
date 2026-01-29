@@ -27,6 +27,7 @@
 #include "pin_config.h"
 #include "system_state.h"
 #include "rtc_ds1307.h"
+#include "led_strip.h"
 
 static const char *TAG = "andon_display";
 
@@ -39,6 +40,16 @@ static volatile int write_buffer = 1;   // Update writes to this
 // Macro for easier access
 #define SCAN_DATA_READ  scan_data_buffers[active_buffer]
 #define SCAN_DATA_WRITE scan_data_buffers[write_buffer]
+
+// Özel karakterler (CD4543 BCD -> Segment mapping varsayımları)
+// L=12, E=14, d=13, P=11, r=10 (standard symbol mapping)
+#define CHAR_L 12
+#define CHAR_E 14
+#define CHAR_D 13
+#define CHAR_P 11
+#define CHAR_R 10
+#define CHAR_S 5   // '5' looks like 'S'
+#define CHAR_U 11  // Some decoders show U at 11
 
 // ============ HC138 Selection (0-5 valid, 6-7 = all off) ============
 void andon_display_select_hane(int hane) {
@@ -197,6 +208,33 @@ void andon_display_update(void) {
         if (verim_val > 99) verim_val = 99;  // Max 99%
     }
     verim_to_2digits(verim_val, verim);
+    
+    // ========== MENÜ AYAR EKRANI MODU ==========
+    if (sys_data.menu_step > 0) {
+        // Tüm haneleri temizle varsayılan olarak
+        memset(saat, DISPLAY_BLANK, sizeof(saat));
+        memset(durus, DISPLAY_BLANK, sizeof(durus));
+        memset(calisma, DISPLAY_BLANK, sizeof(calisma));
+        memset(atil, DISPLAY_BLANK, sizeof(atil));
+        memset(planli, DISPLAY_BLANK, sizeof(planli));
+        memset(hedef, DISPLAY_BLANK, sizeof(hedef));
+        memset(gerceklesen, DISPLAY_BLANK, sizeof(gerceklesen));
+        memset(verim, DISPLAY_BLANK, sizeof(verim));
+
+        if (sys_data.menu_step == 1) {
+            // Parlaklık Ayarı: Değer LD4 (Atıl Zaman) hanesinde görünür
+            atil[0] = sys_data.led_brightness_idx;
+        } else if (sys_data.menu_step == 2) {
+            // Süre Ayarı: Değer LD4 (Atıl Zaman) hanesinde görünür
+            uint32_t target = led_strip_get_cycle_target();
+            atil[0] = target % 10;
+            atil[1] = (target / 10) % 10;
+            atil[2] = (target / 100) % 10;
+            atil[3] = (target / 1000) % 10;
+            atil[4] = (target / 10000) % 10;
+            atil[5] = (target / 100000) % 10;
+        }
+    }
     
     // Write to WRITE buffer (display reads from ACTIVE buffer)
     // Önce write buffer'ı temizle (Ghosting veya eski verileri engellemek için)

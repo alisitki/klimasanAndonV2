@@ -71,4 +71,14 @@ void led_strip_acknowledge_alarm(void);
  */
 void led_strip_clear(void);
 
+/**
+ * @brief Menü için önizleme modunu aç/kapat (tüm LED'leri yakar)
+ */
+void led_strip_set_menu_preview(bool active);
+
+/**
+ * @brief Parlaklık seviyesini (1-5) ayarlar
+ */
+void led_strip_set_brightness_idx(uint8_t index);
+
 #endif // LED_STRIP_H

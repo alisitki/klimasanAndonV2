@@ -24,6 +24,8 @@ typedef enum {
     IR_INPUT_CYCLE_TIME,    // Cycle süresi girişi
     IR_INPUT_PIN,           // Yetkili PIN girişi
     IR_INPUT_CLOCK,         // Saat ayarı modu
+    IR_INPUT_MENU_BRIGHT,   // LED Parlaklık ayarı (Menü 1)
+    IR_INPUT_MENU_TIME,     // LED Süre ayarı (Menü 2)
 } ir_input_mode_t;
 
 /**

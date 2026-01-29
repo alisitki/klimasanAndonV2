@@ -41,6 +41,12 @@ void nvs_storage_save_cycle_target(uint32_t seconds);
 uint32_t nvs_storage_load_cycle_target(void);
 
 /**
+ * @brief LED Parlaklık seviyesini (1-5) kaydet/yükle
+ */
+void nvs_storage_save_brightness(uint8_t level);
+uint8_t nvs_storage_load_brightness(void);
+
+/**
  * @brief Sistem durumunu kaydet (async)
  */
 void nvs_storage_save_state(void);

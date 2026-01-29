@@ -10,6 +10,7 @@
 
 // ============ Çalışma Modları (State Machine) ============
 typedef enum {
+    MODE_STANDBY,   // Bekleme modu - Hiçbir şey saymaz (açılış varsayılanı)
     MODE_WORK,      // Çalışma modu - work_time sayar
     MODE_IDLE,      // Atıl mod - idle_time sayar
     MODE_PLANNED,   // Planlı duruş - planned_time sayar
@@ -54,11 +55,18 @@ typedef struct {
     uint8_t clock_step;         // 0: mod kapalı, 1: saat seçili, 2: dakika seçili
     uint8_t clock_hours;
     uint8_t clock_minutes;
+    uint8_t clock_backup_hours;   // Reversion için yedek
+    uint8_t clock_backup_minutes; // Reversion için yedek
     bool clock_blink_on;        // Yan-sön durumu
+    
+    // Menü ayarları yardımcıları
+    uint8_t menu_step;          // 0:Kapalı, 1:Parlaklık, 2:Süre
+    uint8_t led_brightness_idx; // 1-5 arası parlaklık seviyesi
 } system_data_t;
 
 // ============ NVS Backup Yapısı ============
 typedef struct {
+    bool valid;                 // Veri başarıyla yüklendi mi?
     uint8_t work_mode;          // MODE_WORK, MODE_IDLE, MODE_PLANNED
     uint8_t shift_state;        // SHIFT_RUNNING, SHIFT_STOPPED
     uint32_t work_t;
@@ -67,6 +75,7 @@ typedef struct {
     uint32_t prod_cnt;
     uint32_t target_cnt;
     uint32_t cycle_target;
+    uint32_t durus_t;           // Duruş süresi yedeği
     uint32_t last_upd;
 } system_state_backup_t;
 

@@ -33,7 +33,7 @@ static const char *TAG = "klimasan_main";
 
 // ============ Global Değişken Tanımları ============
 volatile system_data_t sys_data = {0};
-work_mode_t current_mode = MODE_IDLE;
+work_mode_t current_mode = MODE_STANDBY;
 shift_state_t shift_state = SHIFT_RUNNING;
 
 // ============ Duruş Süresi Yönetimi ============
@@ -60,10 +60,13 @@ static void update_durus_timer(void) {
 // ============ Mode Değişim Fonksiyonları ============
 
 static void switch_to_work_mode(void) {
-    if (current_mode == MODE_WORK) return;
-    
-    // Sayaçları aktif et
+    // Sayaçları aktif et (her ihtimale karşı zorla)
     sys_data.counting_active = true;
+
+    if (current_mode == MODE_WORK) {
+        andon_display_update();
+        return;
+    }
     
     // Duruş timer'ı durdur (frozen value)
     stop_durus_timer();
@@ -76,13 +79,16 @@ static void switch_to_work_mode(void) {
 }
 
 static void switch_to_idle_mode(void) {
-    if (current_mode == MODE_IDLE && sys_data.counting_active) return;
-    
     // Sayaçları aktif et
     sys_data.counting_active = true;
+
+    if (current_mode == MODE_IDLE) {
+        andon_display_update();
+        return;
+    }
     
-    // Duruş timer'ı başlat (eğer daha önce WORK'te idiysek)
-    if (current_mode == MODE_WORK) {
+    // Duruş timer'ı başlat (eğer daha önce WORK'te idiysek veya Standby'da isek)
+    if (current_mode == MODE_WORK || current_mode == MODE_STANDBY) {
         sys_data.durus_time = 0;  // Yeni duruş, sıfırdan başla
     }
     start_durus_timer();
@@ -94,13 +100,16 @@ static void switch_to_idle_mode(void) {
 }
 
 static void switch_to_planned_mode(void) {
-    if (current_mode == MODE_PLANNED && sys_data.counting_active) return;
-    
     // Sayaçları aktif et
     sys_data.counting_active = true;
+
+    if (current_mode == MODE_PLANNED) {
+        andon_display_update();
+        return;
+    }
     
-    // Duruş timer'ı başlat (eğer daha önce WORK'te idiysek)
-    if (current_mode == MODE_WORK) {
+    // Duruş timer'ı başlat (eğer daha önce WORK'te idiysek veya Standby'da isek)
+    if (current_mode == MODE_WORK || current_mode == MODE_STANDBY) {
         sys_data.durus_time = 0;  // Yeni duruş, sıfırdan başla
     }
     start_durus_timer();
@@ -121,8 +130,8 @@ static void timer_task(void *pvParameters) {
             continue;
         }
         
-        // Sayaçlar aktif değilse (veya saat ayarı modundaysak) sadece display güncelle
-        if (!sys_data.counting_active || sys_data.clock_step > 0) {
+        // Sayaçlar aktif değilse (veya bekleme modundaysak) sadece display güncelle
+        if (!sys_data.counting_active || current_mode == MODE_STANDBY) {
             andon_display_update();
             continue;
         }
@@ -135,6 +144,9 @@ static void timer_task(void *pvParameters) {
         
         // Mevcut moda göre ilgili sayaç artar
         switch (current_mode) {
+            case MODE_STANDBY:
+                // Standby modunda hiçbir şey sayılmaz
+                break;
             case MODE_WORK:
                 sys_data.work_time++;
                 break;
@@ -151,8 +163,12 @@ static void timer_task(void *pvParameters) {
         // Display güncelle
         andon_display_update();
         
-        // Periyodik kayıt
-        nvs_storage_save_state();
+        // Periyodik kayıt (60 saniyede bir - Flash ömrü için)
+        static uint8_t save_counter = 0;
+        if (++save_counter >= 60) {
+            save_counter = 0;
+            nvs_storage_save_state();
+        }
     }
 }
 
@@ -233,6 +249,34 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     ESP_LOGI(TAG, "IR: Addr=0x%02X, Cmd=0x%02X", address, command);
     
     ir_input_mode_t input_mode = ir_remote_get_input_mode();
+
+    // ========== MENÜ/SAAT AYARI LOCKOUT ==========
+    // Eğer LED Menü modundaysak, sadece LED ayar tuşlarını işle
+    if (sys_data.menu_step > 0) {
+        bool allowed = false;
+        if (address == 0xFD && command == 0x1D) allowed = true; // Menu tuşu (kendi tuşu)
+        if ((address == 0xFF && command == 0x02) || (address == 0xFE)) allowed = true; // MUTE (sıfırlama)
+        if (address == 0xFA && command == 0x1D) allowed = true; // UP
+        if (address == 0xF9 && command == 0x1D) allowed = true; // DOWN
+        if (decode_ir_digit(address, command) >= 0) allowed = true; // Rakamlar
+        
+        if (!allowed) {
+            ESP_LOGW(TAG, "IR: LED Menü modunda bu komut engellendi (Addr:0x%02X, Cmd:0x%02X)", address, command);
+            return;
+        }
+    }
+    // Eğer Saat Ayarı modundaysak, sadece Saat ayar tuşlarını işle
+    else if (sys_data.clock_step > 0) {
+        bool allowed = false;
+        if (address == 0xFB && command == 0x1D) allowed = true; // Saat Ayarı tuşu (kendi tuşu)
+        if (decode_ir_digit(address, command) >= 0) allowed = true; // Rakamlar
+        if ((address == 0xFF && command == 0xF0) || (address == 0xF0)) allowed = true; // OK tuşu (bazı durumlarda çıkış için)
+
+        if (!allowed) {
+            ESP_LOGW(TAG, "IR: Saat Ayarı modunda bu komut engellendi (Addr:0x%02X, Cmd:0x%02X)", address, command);
+            return;
+        }
+    }
     
     // Rakam girişi modunda
     int8_t digit = decode_ir_digit(address, command);
@@ -240,16 +284,23 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         if (input_mode == IR_INPUT_CLOCK) {
             // SAAT AYARI MODU
             if (sys_data.clock_step == 1) {
-                // Saat hanesi
+                // Saat hanesi (Artık kısıtlama yok, tamamlanınca bakılacak)
                 sys_data.clock_hours = (sys_data.clock_hours % 10) * 10 + digit;
-                if (sys_data.clock_hours > 23) sys_data.clock_hours = 23;
-                ESP_LOGI(TAG, "Clock Entry: Hour = %02d", sys_data.clock_hours);
+                ESP_LOGI(TAG, "Clock Entry: Hour = %02d (Validation at step-end)", sys_data.clock_hours);
             } else if (sys_data.clock_step == 2) {
-                // Dakika hanesi
+                // Dakika hanesi (Artık kısıtlama yok, tamamlanınca bakılacak)
                 sys_data.clock_minutes = (sys_data.clock_minutes % 10) * 10 + digit;
-                if (sys_data.clock_minutes > 59) sys_data.clock_minutes = 59;
-                ESP_LOGI(TAG, "Clock Entry: Minute = %02d", sys_data.clock_minutes);
+                ESP_LOGI(TAG, "Clock Entry: Minute = %02d (Validation at end)", sys_data.clock_minutes);
             }
+        } else if (input_mode == IR_INPUT_MENU_BRIGHT) {
+            // Parlaklık Ayarı modundayken yukarı/aşağı kullanılır (rakam ignored)
+            ESP_LOGW(TAG, "Rakam ignored in Brightness mode. Use UP/DOWN.");
+        } else if (input_mode == IR_INPUT_MENU_TIME) {
+            // LED Süre modundayken rakamlara basarak ayarlanır
+            uint32_t val = led_strip_get_cycle_target();
+            val = (val % 100000) * 10 + digit;
+            led_strip_set_cycle_target(val);
+            ESP_LOGI(TAG, "Menu LED Time Entry: %lu", (unsigned long)val);
         } else if (input_mode == IR_INPUT_CYCLE_TIME) {
             // Cycle Süresi modundayken buraya girer
             uint32_t val = led_strip_get_cycle_target();
@@ -308,6 +359,56 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         ESP_LOGW(TAG, "Ekran kapalı - komut ignored");
         return;
     }
+
+    // ========== MENU TUŞU (LED AYARLARI) ==========
+    // 0xFD, 0x1D → Menu tuşu
+    if (address == 0xFD && command == 0x1D) {
+        if (sys_data.clock_step > 0) {
+            ESP_LOGW(TAG, "Saat ayarı modundayken LED Menüye girilemez");
+            return;
+        }
+        if (sys_data.menu_step == 0) {
+            // Normalden -> Parlaklık Ayarına
+            sys_data.menu_step = 1;
+            ir_remote_set_input_mode(IR_INPUT_MENU_BRIGHT);
+            led_strip_set_menu_preview(true);
+            ESP_LOGI(TAG, "IR: Menu -> LED Parlaklık Ayarı");
+        } else if (sys_data.menu_step == 1) {
+            // Parlaklıktan -> Süre Ayarına
+            sys_data.menu_step = 2;
+            ir_remote_set_input_mode(IR_INPUT_MENU_TIME);
+            led_strip_set_menu_preview(true); // Preview stays true during time adjustment
+            ESP_LOGI(TAG, "IR: Menu -> LED Süre Ayarı");
+        } else {
+            // Süreden -> Çıkış ve Kaydet
+            nvs_storage_save_brightness(sys_data.led_brightness_idx);
+            nvs_storage_save_cycle_target(led_strip_get_cycle_target());
+            sys_data.menu_step = 0;
+            ir_remote_set_input_mode(IR_INPUT_NONE);
+            led_strip_set_menu_preview(false); // Only now turn off preview
+            ESP_LOGI(TAG, "IR: Menu -> Ayarlar Kaydedildi ve Çıkıldı");
+        }
+        andon_display_update();
+        return;
+    }
+
+    // ========== YUKARI / AŞAĞI TUŞLARI (Parlaklık için) ==========
+    if (sys_data.menu_step == 1) {
+        if (address == 0xFA && command == 0x1D) { // YUKARI
+            if (sys_data.led_brightness_idx < 5) sys_data.led_brightness_idx++;
+            led_strip_set_brightness_idx(sys_data.led_brightness_idx);
+            ESP_LOGI(TAG, "IR: Parlaklık Artırıldı: %d", sys_data.led_brightness_idx);
+            andon_display_update();
+            return;
+        }
+        if (address == 0xF9 && command == 0x1D) { // AŞAĞI
+            if (sys_data.led_brightness_idx > 1) sys_data.led_brightness_idx--;
+            led_strip_set_brightness_idx(sys_data.led_brightness_idx);
+            ESP_LOGI(TAG, "IR: Parlaklık Azaltıldı: %d", sys_data.led_brightness_idx);
+            andon_display_update();
+            return;
+        }
+    }
     
     // ========== IR BUTON → MOD DEĞİŞİMİ ==========
     // 0xDA, 0x1D → Yeşil → WORK modu
@@ -331,17 +432,17 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         return;
     }
     
-    // 0xD8, 0x1D → Mavi → Adet +1 (WORK modunda)
+    // 0xD8, 0x1D → Mavi → Adet +1 (Sadece WORK modunda ve Sayaç aktifken)
     if (address == 0xD8 && command == 0x1D) {
-        if (current_mode == MODE_WORK) {
+        if (current_mode == MODE_WORK && sys_data.counting_active) {
             sys_data.produced_count++;
             ESP_LOGI(TAG, "IR: Mavi → Adet: %lu / %lu", 
                      (unsigned long)sys_data.produced_count, (unsigned long)sys_data.target_count);
             led_strip_start_cycle();
-            nvs_storage_save_state();
+            nvs_storage_save_state_immediate(); // Kritik: Adet artınca hemen kaydet
             andon_display_update();
         } else {
-            ESP_LOGW(TAG, "IR: Mavi buton sadece WORK modunda çalışır");
+            ESP_LOGW(TAG, "IR: Mavi buton sadece aktif WORK modunda çalışır (Timer:%d)", sys_data.counting_active);
         }
         return;
     }
@@ -351,6 +452,19 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     // Hedef Sıfırlama (0xFE address)
     // MUTE / SIFIRLA (0xFF, 0x02 veya 0xFE adresi)
     if ((address == 0xFF && command == 0x02) || (address == 0xFE)) {
+        // Eğer alarm aktifse SADECE sustur (sıfırlama yapma)
+        if (led_strip_is_alarm_active()) {
+            led_strip_acknowledge_alarm();
+            ESP_LOGI(TAG, "IR: MUTE -> Alarm susturuldu");
+            return;
+        }
+
+        if (sys_data.menu_step == 2) {
+            led_strip_set_cycle_target(0);
+            ESP_LOGI(TAG, "IR: Menu -> LED Süre sıfırlandı");
+            andon_display_update();
+            return;
+        }
         sys_data.target_count = 0;
         nvs_storage_save_target(0);
         ir_remote_set_input_mode(IR_INPUT_NONE);
@@ -359,12 +473,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         return;
     }
     
-    // Alarm Kabul
-    if ((address == 0xFF && command == 0xA0) || (address == 0xA0)) {
-        led_strip_acknowledge_alarm();
-        ESP_LOGI(TAG, "IR: Alarm kabul edildi");
-        return;
-    }
+
     
     // Vardiya Durdur/Başlat
     if ((address == 0xFF && command == 0xB0) || (address == 0xB0)) {
@@ -397,12 +506,16 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     
     // Saat Ayarı Modu (FKB / 0xFB, 0x1D)
     if (address == 0xFB && command == 0x1D) {
+        if (sys_data.menu_step > 0) {
+            ESP_LOGW(TAG, "LED Menü modundayken Saat Ayarına girilemez");
+            return;
+        }
         if (sys_data.clock_step == 0) {
             // Modu başlat: Saat adımına geç
             ir_remote_set_input_mode(IR_INPUT_CLOCK);
             sys_data.clock_step = 1;
             
-            // Mevcut zamanı al
+            // Mevcut zamanı al ve yedekle
             struct tm tm_now;
             if (rtc_ds1307_read_tm(&tm_now) != ESP_OK) {
                 time_t now = time(NULL);
@@ -411,14 +524,25 @@ static void on_ir_command(uint8_t address, uint8_t command) {
             }
             sys_data.clock_hours = tm_now.tm_hour;
             sys_data.clock_minutes = tm_now.tm_min;
+            sys_data.clock_backup_hours = tm_now.tm_hour;
+            sys_data.clock_backup_minutes = tm_now.tm_min;
             sys_data.clock_blink_on = true;
-            ESP_LOGI(TAG, "IR: Saat Ayarı Modu Başladı (Saat Adımı)");
+            ESP_LOGI(TAG, "IR: Saat Ayarı Modu Başladı (Yedek: %02d:%02d)", sys_data.clock_backup_hours, sys_data.clock_backup_minutes);
         } else if (sys_data.clock_step == 1) {
-            // Saat bitti, dakikaya geç
+            // Saat bitti, dakikaya geçmeden önce SAATİ doğrula
+            if (sys_data.clock_hours > 23) {
+                ESP_LOGW(TAG, "IR: Geçersiz SAAT (%d) -> Eski değere (%d) dönülüyor", sys_data.clock_hours, sys_data.clock_backup_hours);
+                sys_data.clock_hours = sys_data.clock_backup_hours;
+            }
             sys_data.clock_step = 2;
             ESP_LOGI(TAG, "IR: Saat Ayarı (Dakika Adımı)");
         } else {
-            // Dakika da bitti, Kaydet ve Çık
+            // Dakika bitti, DAKİKAYI doğrula
+            if (sys_data.clock_minutes > 59) {
+                ESP_LOGW(TAG, "IR: Geçersiz DAKİKA (%d) -> Eski değere (%d) dönülüyor", sys_data.clock_minutes, sys_data.clock_backup_minutes);
+                sys_data.clock_minutes = sys_data.clock_backup_minutes;
+            }
+            // Kaydet ve Çık
             rtc_ds1307_set_time(sys_data.clock_hours, sys_data.clock_minutes);
             sys_data.clock_step = 0;
             ir_remote_set_input_mode(IR_INPUT_NONE);
@@ -469,8 +593,11 @@ static void power_on_recovery(void) {
     // Varsayılan değerler
     sys_data.target_count = nvs_storage_load_target();
     led_strip_set_cycle_target(nvs_storage_load_cycle_target());
+    sys_data.led_brightness_idx = nvs_storage_load_brightness();
+    led_strip_set_brightness_idx(sys_data.led_brightness_idx);
+    sys_data.menu_step = 0;
     
-    if (last.shift_state == SHIFT_STOPPED) {
+    if (last.valid && last.shift_state == SHIFT_STOPPED) {
         // Vardiya durdurulmuş olarak kalmıştı
         shift_state = SHIFT_STOPPED;
         current_mode = (work_mode_t)last.work_mode;
@@ -478,15 +605,16 @@ static void power_on_recovery(void) {
         sys_data.idle_time = last.idle_t;
         sys_data.planned_time = last.planned_t;
         sys_data.produced_count = last.prod_cnt;
+        sys_data.durus_time = last.durus_t; // DURUS RESTORE
         ESP_LOGI(TAG, "🔄 RECOVERY: Shift STOPPED, ekran donuk");
         
-    } else if (last.work_mode == MODE_WORK) {
-        // WORK modunda güç kesilmişti
         current_mode = MODE_WORK;
+        sys_data.counting_active = true; // Senkronize başla
         sys_data.work_time = last.work_t;
         sys_data.idle_time = last.idle_t;
         sys_data.planned_time = last.planned_t;
         sys_data.produced_count = last.prod_cnt;
+        sys_data.durus_time = last.durus_t; // DURUS RESTORE (Çalışırken muhtemelen 0'dır ama yedek kalsın)
         
         // Offline süresini work_time'a ekle
         uint32_t now = rtc_get_wall_time_seconds();
@@ -494,18 +622,20 @@ static void power_on_recovery(void) {
             uint32_t offline = now - last.last_upd;
             if (offline < 86400) {  // Max 24 saat
                 sys_data.work_time += offline;
+                // WORK modunda duruş süresi artmaz
                 ESP_LOGI(TAG, "⏱️ Offline: %lu sec → work_time += %lu", (unsigned long)offline, (unsigned long)offline);
             }
         }
         ESP_LOGI(TAG, "🔄 RECOVERY: MODE_WORK continues");
         
-    } else if (last.work_mode == MODE_IDLE || last.work_mode == MODE_PLANNED) {
+    } else if (last.valid && (last.work_mode == MODE_IDLE || last.work_mode == MODE_PLANNED)) {
         // IDLE veya PLANNED modunda güç kesilmişti
         current_mode = (work_mode_t)last.work_mode;
         sys_data.work_time = last.work_t;
         sys_data.idle_time = last.idle_t;
         sys_data.planned_time = last.planned_t;
         sys_data.produced_count = last.prod_cnt;
+        sys_data.durus_time = last.durus_t; // DURUS RESTORE
         
         // Offline süresini ilgili sayaca ekle
         uint32_t now = rtc_get_wall_time_seconds();
@@ -517,25 +647,33 @@ static void power_on_recovery(void) {
                 } else {
                     sys_data.planned_time += offline;
                 }
-                ESP_LOGI(TAG, "⏱️ Offline: %lu sec added to mode %d", offline, current_mode);
+                sys_data.durus_time += offline; // Offline süresini mevcut duruşa da ekle
+                ESP_LOGI(TAG, "⏱️ Offline: %lu sec added to mode %d and durus_time", (unsigned long)offline, current_mode);
             }
         }
         
         // Duruş timer'ı başlat
+        sys_data.counting_active = true;
         start_durus_timer();
         ESP_LOGI(TAG, "🔄 RECOVERY: MODE_%s continues", 
                  current_mode == MODE_IDLE ? "IDLE" : "PLANNED");
         
     } else {
-        // Yeni başlangıç
-        current_mode = MODE_IDLE;
+        // Yeni başlangıç veya geçersiz veri -> STANDBY'da bekle
+        current_mode = MODE_STANDBY;
         shift_state = SHIFT_RUNNING;
-        start_durus_timer();
-        ESP_LOGI(TAG, "Fresh start - MODE_IDLE");
+        sys_data.work_time = 0;
+        sys_data.idle_time = 0;
+        sys_data.planned_time = 0;
+        sys_data.produced_count = 0;
+        sys_data.counting_active = false; // Kullanıcı butona basana kadar bekle
+        ESP_LOGI(TAG, "Fresh start (NVS invalid or empty) - MODE_STANDBY");
     }
     
     // Ekran varsayılan olarak AÇIK
     sys_data.screen_on = true;
+    sys_data.menu_step = 0;
+    andon_display_update();
 }
 
 // ============ Main Entry Point ============
