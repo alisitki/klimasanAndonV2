@@ -35,6 +35,7 @@ static const char *TAG = "klimasan_main";
 volatile system_data_t sys_data = {0};
 work_mode_t current_mode = MODE_STANDBY;
 shift_state_t shift_state = SHIFT_RUNNING;
+portMUX_TYPE sys_data_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============ Duruş Süresi Yönetimi ============
 // WORK dışındaki modlarda çalışır, WORK'e geçince donar
@@ -142,7 +143,8 @@ static void timer_task(void *pvParameters) {
             continue;
         }
         
-        // Mevcut moda göre ilgili sayaç artar
+        // Mevcut moda göre ilgili sayaç artar (spinlock korumalı)
+        taskENTER_CRITICAL(&sys_data_mux);
         switch (current_mode) {
             case MODE_STANDBY:
                 // Standby modunda hiçbir şey sayılmaz
@@ -159,6 +161,7 @@ static void timer_task(void *pvParameters) {
                 update_durus_timer();
                 break;
         }
+        taskEXIT_CRITICAL(&sys_data_mux);
         
         // Display güncelle
         andon_display_update();
@@ -193,7 +196,9 @@ static void on_button_event(button_event_t event) {
         case BUTTON_EVENT_ORANGE:
             // Turuncu buton: Adet +1 (sadece WORK modunda)
             if (current_mode == MODE_WORK) {
+                taskENTER_CRITICAL(&sys_data_mux);
                 sys_data.produced_count++;
+                taskEXIT_CRITICAL(&sys_data_mux);
                 ESP_LOGI(TAG, "🟠 Adet: %lu / %lu", 
                          (unsigned long)sys_data.produced_count, (unsigned long)sys_data.target_count);
                 
@@ -341,7 +346,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
             sys_data.produced_count = 0;
             sys_data.durus_time = 0;
             sys_data.durus_running = false;
-            current_mode = MODE_IDLE;
+            current_mode = MODE_STANDBY;
             
             // Hedef adet NVS'den yükle
             sys_data.target_count = nvs_storage_load_target();
@@ -395,7 +400,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     // ========== YUKARI / AŞAĞI TUŞLARI (Parlaklık için) ==========
     if (sys_data.menu_step == 1) {
         if (address == 0xFA && command == 0x1D) { // YUKARI
-            if (sys_data.led_brightness_idx < 5) sys_data.led_brightness_idx++;
+            if (sys_data.led_brightness_idx < 4) sys_data.led_brightness_idx++;
             led_strip_set_brightness_idx(sys_data.led_brightness_idx);
             ESP_LOGI(TAG, "IR: Parlaklık Artırıldı: %d", sys_data.led_brightness_idx);
             andon_display_update();
@@ -475,8 +480,8 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     
 
     
-    // Vardiya Durdur/Başlat
-    if ((address == 0xFF && command == 0xB0) || (address == 0xB0)) {
+    // Vardiya Durdur/Başlat (0xFC, 0x1D)
+    if (address == 0xFC && command == 0x1D) {
         if (shift_state == SHIFT_RUNNING) {
             shift_state = SHIFT_STOPPED;
             ESP_LOGI(TAG, "IR: Vardiya DURDURULDU (ekran donuk)");
@@ -598,35 +603,16 @@ static void power_on_recovery(void) {
     sys_data.menu_step = 0;
     
     if (last.valid && last.shift_state == SHIFT_STOPPED) {
-        // Vardiya durdurulmuş olarak kalmıştı
+        // Vardiya durdurulmuş olarak kalmıştı — kaydedilen modda devam et
         shift_state = SHIFT_STOPPED;
         current_mode = (work_mode_t)last.work_mode;
         sys_data.work_time = last.work_t;
         sys_data.idle_time = last.idle_t;
         sys_data.planned_time = last.planned_t;
         sys_data.produced_count = last.prod_cnt;
-        sys_data.durus_time = last.durus_t; // DURUS RESTORE
-        ESP_LOGI(TAG, "🔄 RECOVERY: Shift STOPPED, ekran donuk");
-        
-        current_mode = MODE_WORK;
-        sys_data.counting_active = true; // Senkronize başla
-        sys_data.work_time = last.work_t;
-        sys_data.idle_time = last.idle_t;
-        sys_data.planned_time = last.planned_t;
-        sys_data.produced_count = last.prod_cnt;
-        sys_data.durus_time = last.durus_t; // DURUS RESTORE (Çalışırken muhtemelen 0'dır ama yedek kalsın)
-        
-        // Offline süresini work_time'a ekle
-        uint32_t now = rtc_get_wall_time_seconds();
-        if (last.last_upd > 0 && now > last.last_upd) {
-            uint32_t offline = now - last.last_upd;
-            if (offline < 86400) {  // Max 24 saat
-                sys_data.work_time += offline;
-                // WORK modunda duruş süresi artmaz
-                ESP_LOGI(TAG, "⏱️ Offline: %lu sec → work_time += %lu", (unsigned long)offline, (unsigned long)offline);
-            }
-        }
-        ESP_LOGI(TAG, "🔄 RECOVERY: MODE_WORK continues");
+        sys_data.durus_time = last.durus_t;
+        sys_data.counting_active = false;  // Vardiya durmuştu, sayaç pasif
+        ESP_LOGI(TAG, "🔄 RECOVERY: Shift STOPPED, mode=%d, ekran donuk", current_mode);
         
     } else if (last.valid && (last.work_mode == MODE_IDLE || last.work_mode == MODE_PLANNED)) {
         // IDLE veya PLANNED modunda güç kesilmişti

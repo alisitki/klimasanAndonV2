@@ -172,7 +172,10 @@ static void led_strip_task(void *arg) {
             
             // Alt-saniye hassasiyeti (sub-second precision) ile ratio hesapla
             // Bu sayede 107 LED saniye atlamadan, tek tek (smooth) ilerler
-            float ratio = ((float)g_cycle_elapsed + ((float)g_frame_counter / 30.0f)) / (float)g_cycle_target_sec;
+            float ratio = 0.0f;
+            if (g_cycle_target_sec > 0) {
+                ratio = ((float)g_cycle_elapsed + ((float)g_frame_counter / 30.0f)) / (float)g_cycle_target_sec;
+            }
             
             if (ratio > 1.0f && !g_alarm_acknowledged) {
                 g_alarm_active = true;
@@ -271,7 +274,6 @@ void led_strip_start_cycle(void) {
 }
 
 void led_strip_set_cycle_target(uint32_t seconds) {
-    if (seconds < 1) seconds = 1;
     g_cycle_target_sec = seconds;
 }
 

@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 
 // ============ Çalışma Modları (State Machine) ============
 typedef enum {
@@ -83,5 +85,6 @@ typedef struct {
 extern volatile system_data_t sys_data;
 extern work_mode_t current_mode;
 extern shift_state_t shift_state;
+extern portMUX_TYPE sys_data_mux;
 
 #endif // SYSTEM_STATE_H
