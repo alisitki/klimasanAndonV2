@@ -15,5 +15,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=/Users/stk/Desktop/klimasanAndonV2/build"
-  ]
+  ],
+  "idf.currentSetup": "/Users/stk/esp/v5.4.3/esp-idf"
 }
