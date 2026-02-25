@@ -126,8 +126,11 @@ static void switch_to_planned_mode(void) {
 
 // ============ Timer Task (her saniye) ============
 static void timer_task(void *pvParameters) {
+    TickType_t last_wake = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(1000);  // Tam 1 saniye
+    
     while (1) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&last_wake, period);  // Mutlak zamanlama (drift-free)
         
         // Ekran kapalıysa hiçbir sayaç artmaz
         if (!sys_data.screen_on) {
