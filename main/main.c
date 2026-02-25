@@ -18,6 +18,7 @@
 #include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 // Modüller
 #include "system_state.h"
@@ -126,55 +127,58 @@ static void switch_to_planned_mode(void) {
 
 // ============ Timer Task (her saniye) ============
 static void timer_task(void *pvParameters) {
-    TickType_t last_wake = xTaskGetTickCount();
-    const TickType_t period = pdMS_TO_TICKS(1000);  // Tam 1 saniye
+    int64_t last_us = esp_timer_get_time();
+    int64_t accumulator_us = 0;
     
     while (1) {
-        vTaskDelayUntil(&last_wake, period);  // Mutlak zamanlama (drift-free)
+        vTaskDelay(pdMS_TO_TICKS(500));  // 500ms yoklama (daha responsive)
         
-        // Ekran kapalıysa hiçbir sayaç artmaz
-        if (!sys_data.screen_on) {
-            continue;
-        }
+        // Gercek gecen sureyi olc (esp_timer = 40MHz crystal tabanli)
+        int64_t now_us = esp_timer_get_time();
+        int64_t elapsed_us = now_us - last_us;
+        last_us = now_us;
         
-        // Sayaçlar aktif değilse (veya bekleme modundaysak) sadece display güncelle
-        if (!sys_data.counting_active || current_mode == MODE_STANDBY) {
+        // Ekran kapaliysa veya sayac pasifse sadece display guncelle
+        if (!sys_data.screen_on || !sys_data.counting_active || 
+            current_mode == MODE_STANDBY || shift_state == SHIFT_STOPPED) {
+            // Accumulator'u sifirla ki drift olmasin
+            accumulator_us = 0;
             andon_display_update();
             continue;
         }
         
-        // Vardiya durdurulmuşsa hiçbir sayaç artmaz
-        if (shift_state == SHIFT_STOPPED) {
-            andon_display_update();
-            continue;
+        // Mikrosaniye biriktiriciye ekle
+        accumulator_us += elapsed_us;
+        
+        // Her 1.000.000 us (1 saniye) icin sayac artir
+        while (accumulator_us >= 1000000) {
+            accumulator_us -= 1000000;
+            
+            taskENTER_CRITICAL(&sys_data_mux);
+            switch (current_mode) {
+                case MODE_STANDBY:
+                    break;
+                case MODE_WORK:
+                    sys_data.work_time++;
+                    break;
+                case MODE_IDLE:
+                    sys_data.idle_time++;
+                    update_durus_timer();
+                    break;
+                case MODE_PLANNED:
+                    sys_data.planned_time++;
+                    update_durus_timer();
+                    break;
+            }
+            taskEXIT_CRITICAL(&sys_data_mux);
         }
         
-        // Mevcut moda göre ilgili sayaç artar (spinlock korumalı)
-        taskENTER_CRITICAL(&sys_data_mux);
-        switch (current_mode) {
-            case MODE_STANDBY:
-                // Standby modunda hiçbir şey sayılmaz
-                break;
-            case MODE_WORK:
-                sys_data.work_time++;
-                break;
-            case MODE_IDLE:
-                sys_data.idle_time++;
-                update_durus_timer();
-                break;
-            case MODE_PLANNED:
-                sys_data.planned_time++;
-                update_durus_timer();
-                break;
-        }
-        taskEXIT_CRITICAL(&sys_data_mux);
-        
-        // Display güncelle
+        // Display guncelle
         andon_display_update();
         
-        // Periyodik kayıt (60 saniyede bir - Flash ömrü için)
+        // Periyodik kayit (her ~15 saniyede bir)
         static uint8_t save_counter = 0;
-        if (++save_counter >= 15) {  // Her 15 saniyede bir (was 60)
+        if (++save_counter >= 30) {  // 30 * 500ms = 15 saniye
             save_counter = 0;
             nvs_storage_save_state();
         }
