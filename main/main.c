@@ -21,7 +21,7 @@
 
 // Modüller
 #include "system_state.h"
-#include "pin_config.h"
+
 #include "andon_display.h"
 #include "led_strip.h"
 #include "rtc_ds1307.h"
@@ -73,7 +73,10 @@ static void switch_to_work_mode(void) {
     stop_durus_timer();
     
     current_mode = MODE_WORK;
-    led_strip_clear(); // WORK'e geçince LED barı söndür (adet gelince başlayacak)
+    // Alarm aktifse bar'ı ve buzzer'ı dokunma — sadece MUTE ile susturulur
+    if (!led_strip_is_alarm_active()) {
+        led_strip_clear(); // WORK'e geçince LED barı söndür (adet gelince başlayacak)
+    }
     ESP_LOGI(TAG, "🟢 MODE: WORK (Çalışma zamanı sayılıyor)");
     nvs_storage_save_state_immediate();
     andon_display_update();
@@ -644,6 +647,29 @@ static void power_on_recovery(void) {
         ESP_LOGI(TAG, "🔄 RECOVERY: MODE_%s continues", 
                  current_mode == MODE_IDLE ? "IDLE" : "PLANNED");
         
+    } else if (last.valid && last.work_mode == MODE_WORK) {
+        // WORK modunda guc kesilmisti - kaldigi yerden devam et
+        shift_state = SHIFT_RUNNING;
+        current_mode = MODE_WORK;
+        sys_data.work_time = last.work_t;
+        sys_data.idle_time = last.idle_t;
+        sys_data.planned_time = last.planned_t;
+        sys_data.produced_count = last.prod_cnt;
+        sys_data.durus_time = last.durus_t;
+
+        // Offline sureyi work_time'a ekle
+        uint32_t now_w = rtc_get_wall_time_seconds();
+        if (last.last_upd > 0 && now_w > last.last_upd) {
+            uint32_t offline = now_w - last.last_upd;
+            if (offline < 86400) {  // Max 24 saat
+                sys_data.work_time += offline;
+                ESP_LOGI(TAG, "Offline: %lu sec -> work_time += %lu", (unsigned long)offline, (unsigned long)offline);
+            }
+        }
+        sys_data.counting_active = true;
+        ESP_LOGI(TAG, "RECOVERY: MODE_WORK continues (Work:%lu, Prod:%lu)",
+                 (unsigned long)sys_data.work_time, (unsigned long)sys_data.produced_count);
+
     } else {
         // Yeni başlangıç veya geçersiz veri -> STANDBY'da bekle
         current_mode = MODE_STANDBY;

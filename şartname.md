@@ -80,4 +80,5 @@ susmayacaktır. Alarm kabul edildikten sonra, Görsel kırmızı durum devam ede
 sıfırlanana kadar normal moda dönmez.
 ▪ “Cycle süresi” üzerindeki yeşil-turuncu-kırmızı renkler bir bar “İbre” dolum mantığıyla 0’dan
 başlayarak renkli şekilde yanarak artacak şekilde görsel olacaktır.
-▪ Her “Gerçekleşen Adet” turuncu butona basıldığı anda
+▪ Her “Gerçekleşen Adet” turuncu butona basıldığı anda “Cycle bar” göstergesi sıfırlanacaktır ve
+0’dan itibaren tekrar dolmaya başlayacaktır.

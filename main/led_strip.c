@@ -54,6 +54,7 @@ static volatile uint32_t g_frame_counter = 0;
 static volatile bool g_cycle_running = false;
 static volatile bool g_alarm_active = false;
 static volatile bool g_alarm_acknowledged = false;
+static volatile bool g_buzzer_forced_on = false; // Alarm MUTE'a kadar bekleniyor (cycle resetinden etkilenmez)
 static bool g_menu_preview = false;
 
 // Parlaklık kademeleri (1-5)
@@ -178,13 +179,14 @@ static void led_strip_task(void *arg) {
             }
             
             if (ratio > 1.0f && !g_alarm_acknowledged) {
+                // Cycle asimi: alarm aktif
                 g_alarm_active = true;
+                g_buzzer_forced_on = true;  // MUTE basılana kadar koru
                 blink_counter++;
-                if (blink_counter >= 15) { // ~0.5s blink rate at 30fps
+                if (blink_counter >= 15) {
                     blink_state = !blink_state;
                     blink_counter = 0;
                 }
-                
                 if (blink_state) {
                     render_cycle_bar(1.0f);
                     buzzer_on();
@@ -194,8 +196,25 @@ static void led_strip_task(void *arg) {
                 }
                 transmit_leds();
             } else {
+                // Normal mod (ya da alarm acknowledge edildi)
                 g_alarm_active = false;
-                buzzer_off();
+                if (g_buzzer_forced_on) {
+                    // Alarm onceki cycle'dan tasindi, MUTE bekliyor — buzzer blink devam eder
+                    blink_counter++;
+                    if (blink_counter >= 15) {
+                        blink_state = !blink_state;
+                        blink_counter = 0;
+                    }
+                    if (blink_state) {
+                        buzzer_on();
+                    } else {
+                        buzzer_off();
+                    }
+                } else {
+                    buzzer_off();
+                    blink_counter = 0;
+                    blink_state = true;
+                }
                 render_cycle_bar(ratio);
                 transmit_leds();
             }
@@ -269,8 +288,9 @@ void led_strip_start_cycle(void) {
     g_frame_counter = 0;
     g_cycle_running = true;
     g_alarm_active = false;
-    g_alarm_acknowledged = false;
-    ESP_LOGI(TAG, "Cycle started (%lu sec)", (unsigned long)g_cycle_target_sec);
+    g_alarm_acknowledged = false;  // Yeni cycle icin alarm algilama sifirla
+    // g_buzzer_forced_on: dokunma — sadece MUTE (led_strip_acknowledge_alarm) temizler
+    ESP_LOGI(TAG, "Cycle started (%lu sec, buzzer_forced=%d)", (unsigned long)g_cycle_target_sec, g_buzzer_forced_on);
 }
 
 void led_strip_set_cycle_target(uint32_t seconds) {
@@ -282,12 +302,13 @@ uint32_t led_strip_get_cycle_target(void) {
 }
 
 bool led_strip_is_alarm_active(void) {
-    return g_alarm_active;
+    return g_alarm_active || g_buzzer_forced_on;
 }
 
 void led_strip_acknowledge_alarm(void) {
     g_alarm_acknowledged = true;
     g_alarm_active = false;
+    g_buzzer_forced_on = false;  // MUTE: zorla buzzer'i kapat
     buzzer_off();
 }
 
