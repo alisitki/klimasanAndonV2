@@ -127,34 +127,33 @@ static void switch_to_planned_mode(void) {
 
 // ============ Timer Task (her saniye) ============
 static void timer_task(void *pvParameters) {
-    int64_t last_us = esp_timer_get_time();
-    int64_t accumulator_us = 0;
+    uint32_t last_rtc_sec = rtc_get_wall_time_seconds();
     
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(500));  // 500ms yoklama (daha responsive)
+        vTaskDelay(pdMS_TO_TICKS(200));  // 200ms yoklama — RTC saniye degisimini yakala
         
-        // Gercek gecen sureyi olc (esp_timer = 40MHz crystal tabanli)
-        int64_t now_us = esp_timer_get_time();
-        int64_t elapsed_us = now_us - last_us;
-        last_us = now_us;
+        uint32_t now_sec = rtc_get_wall_time_seconds();
         
-        // Ekran kapaliysa veya sayac pasifse sadece display guncelle
-        if (!sys_data.screen_on || !sys_data.counting_active || 
-            current_mode == MODE_STANDBY || shift_state == SHIFT_STOPPED) {
-            // Accumulator'u sifirla ki drift olmasin
-            accumulator_us = 0;
+        // RTC saniyesi degismemisse sadece display guncelle
+        if (now_sec == last_rtc_sec) {
             andon_display_update();
             continue;
         }
         
-        // Mikrosaniye biriktiriciye ekle
-        accumulator_us += elapsed_us;
+        // Kac saniye gecti? (normalde 1, ama tikanma olursa >1 olabilir)
+        uint32_t elapsed = now_sec - last_rtc_sec;
+        last_rtc_sec = now_sec;
         
-        // Her 1.000.000 us (1 saniye) icin sayac artir
-        while (accumulator_us >= 1000000) {
-            accumulator_us -= 1000000;
-            
-            taskENTER_CRITICAL(&sys_data_mux);
+        // Ekran kapali / sayac pasif / standby / shift durdurulmus
+        if (!sys_data.screen_on || !sys_data.counting_active || 
+            current_mode == MODE_STANDBY || shift_state == SHIFT_STOPPED) {
+            andon_display_update();
+            continue;
+        }
+        
+        // Gecen her saniye icin sayac artir
+        taskENTER_CRITICAL(&sys_data_mux);
+        for (uint32_t i = 0; i < elapsed; i++) {
             switch (current_mode) {
                 case MODE_STANDBY:
                     break;
@@ -170,15 +169,16 @@ static void timer_task(void *pvParameters) {
                     update_durus_timer();
                     break;
             }
-            taskEXIT_CRITICAL(&sys_data_mux);
         }
+        taskEXIT_CRITICAL(&sys_data_mux);
         
-        // Display guncelle
+        // Display guncelle (saat ve sayaclar ayni anda)
         andon_display_update();
         
-        // Periyodik kayit (her ~15 saniyede bir)
+        // Periyodik NVS kayit (~15 saniyede bir)
         static uint8_t save_counter = 0;
-        if (++save_counter >= 30) {  // 30 * 500ms = 15 saniye
+        save_counter += elapsed;
+        if (save_counter >= 15) {
             save_counter = 0;
             nvs_storage_save_state();
         }
