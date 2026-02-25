@@ -29,15 +29,19 @@ static void nvs_save_task(void *pvParameters) {
     ESP_LOGI(TAG, "NVS save task started");
     
     while (1) {
-        // Wait for save request with timeout
         if (xQueueReceive(nvs_save_queue, &dummy, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            uint32_t now = xTaskGetTickCount();
+            // ms cinsinden zaman (tick * portTICK_PERIOD_MS)
+            uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
             
-            // Throttle: en az 1 saniye arayla kaydet
-            if ((now - last_save_time) >= 1000) {
+            // Throttle: en az 2 saniye arayla kaydet
+            if ((now - last_save_time) >= 2000) {
                 nvs_handle_t my_handle;
                 esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
                 if (err == ESP_OK) {
+                    // valid=0: yazim basliyor (partial write koruması)
+                    nvs_set_u8(my_handle, "valid", 0);
+                    nvs_commit(my_handle);
+
                     nvs_set_u8(my_handle, "work_mode", (uint8_t)current_mode);
                     nvs_set_u8(my_handle, "shift_state", (uint8_t)shift_state);
                     nvs_set_u32(my_handle, "work_time", sys_data.work_time);
@@ -46,14 +50,17 @@ static void nvs_save_task(void *pvParameters) {
                     nvs_set_u32(my_handle, "produced_cnt", sys_data.produced_count);
                     nvs_set_u32(my_handle, "target_cnt", sys_data.target_count);
                     nvs_set_u32(my_handle, "cycle_target", led_strip_get_cycle_target());
-                    nvs_set_u32(my_handle, "durus_time", sys_data.durus_time); // DURUS EKLE
+                    nvs_set_u32(my_handle, "durus_time", sys_data.durus_time);
                     nvs_set_u32(my_handle, "last_update", rtc_get_wall_time_seconds());
+
+                    // valid=1: tum veriler yazildi, gecerli kayit
+                    nvs_set_u8(my_handle, "valid", 1);
                     nvs_commit(my_handle);
                     nvs_close(my_handle);
                     
-                    ESP_LOGI(TAG, "State saved (Mode:%d, Work:%lu, Prod:%lu, Durus:%lu)", 
+                    ESP_LOGI(TAG, "State saved (Mode:%d, Work:%lu, Prod:%lu)", 
                              current_mode, (unsigned long)sys_data.work_time, 
-                             (unsigned long)sys_data.produced_count, (unsigned long)sys_data.durus_time);
+                             (unsigned long)sys_data.produced_count);
                     last_save_time = now;
                 }
             }
@@ -167,7 +174,15 @@ system_state_backup_t nvs_storage_load_state(void) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
     if (err == ESP_OK) {
-        // En kritik veri: work_mode. Eğer bu yoksa yeni cihaz kabul et.
+        // Once valid flag kontrol et (partial write korumasi)
+        uint8_t v = 0;
+        nvs_get_u8(my_handle, "valid", &v);
+        if (v != 1) {
+            ESP_LOGW(TAG, "NVS: valid flag eksik, fresh start");
+            nvs_close(my_handle);
+            return state;
+        }
+
         err = nvs_get_u8(my_handle, "work_mode", &state.work_mode);
         if (err == ESP_OK) {
             state.valid = true;
@@ -178,17 +193,17 @@ system_state_backup_t nvs_storage_load_state(void) {
             nvs_get_u32(my_handle, "produced_cnt", &state.prod_cnt);
             nvs_get_u32(my_handle, "target_cnt", &state.target_cnt);
             nvs_get_u32(my_handle, "cycle_target", &state.cycle_target);
-            nvs_get_u32(my_handle, "durus_time", &state.durus_t); // DURUS OKU
+            nvs_get_u32(my_handle, "durus_time", &state.durus_t);
             nvs_get_u32(my_handle, "last_update", &state.last_upd);
             
-            ESP_LOGI(TAG, "State loaded Successfully (Mode:%d, Work:%lu, Prod:%lu, Durus:%lu)", 
-                     state.work_mode, (unsigned long)state.work_t, (unsigned long)state.prod_cnt, (unsigned long)state.durus_t);
+            ESP_LOGI(TAG, "State loaded (Mode:%d, Work:%lu, Prod:%lu)", 
+                     state.work_mode, (unsigned long)state.work_t, (unsigned long)state.prod_cnt);
         } else {
-            ESP_LOGW(TAG, "NVS: work_mode not found, fresh start assumed");
+            ESP_LOGW(TAG, "NVS: work_mode not found, fresh start");
         }
         nvs_close(my_handle);
     } else {
-        ESP_LOGW(TAG, "NVS: Open failed (%s), fresh start assumed", esp_err_to_name(err));
+        ESP_LOGW(TAG, "NVS: Open failed (%s), fresh start", esp_err_to_name(err));
     }
     return state;
 }
@@ -197,6 +212,10 @@ void nvs_storage_save_state_immediate(void) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err == ESP_OK) {
+        // valid=0: yazim basliyor
+        nvs_set_u8(my_handle, "valid", 0);
+        nvs_commit(my_handle);
+
         nvs_set_u8(my_handle, "work_mode", (uint8_t)current_mode);
         nvs_set_u8(my_handle, "shift_state", (uint8_t)shift_state);
         nvs_set_u32(my_handle, "work_time", sys_data.work_time);
@@ -205,10 +224,14 @@ void nvs_storage_save_state_immediate(void) {
         nvs_set_u32(my_handle, "produced_cnt", sys_data.produced_count);
         nvs_set_u32(my_handle, "target_cnt", sys_data.target_count);
         nvs_set_u32(my_handle, "cycle_target", led_strip_get_cycle_target());
-        nvs_set_u32(my_handle, "durus_time", sys_data.durus_time); // DURUS EKLE
+        nvs_set_u32(my_handle, "durus_time", sys_data.durus_time);
         nvs_set_u32(my_handle, "last_update", rtc_get_wall_time_seconds());
+
+        // valid=1: tum veriler yazildi
+        nvs_set_u8(my_handle, "valid", 1);
         nvs_commit(my_handle);
         nvs_close(my_handle);
-        ESP_LOGI(TAG, "State saved immediately (Durus:%lu)", (unsigned long)sys_data.durus_time);
+        ESP_LOGI(TAG, "State saved immediately (Mode:%d, Prod:%lu)",
+                 current_mode, (unsigned long)sys_data.produced_count);
     }
 }

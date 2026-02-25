@@ -171,7 +171,7 @@ static void timer_task(void *pvParameters) {
         
         // Periyodik kayıt (60 saniyede bir - Flash ömrü için)
         static uint8_t save_counter = 0;
-        if (++save_counter >= 60) {
+        if (++save_counter >= 15) {  // Her 15 saniyede bir (was 60)
             save_counter = 0;
             nvs_storage_save_state();
         }

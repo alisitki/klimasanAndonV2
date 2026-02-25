@@ -204,7 +204,7 @@ void andon_display_update(void) {
     // LD8: VERİM (%)
     uint32_t verim_val = 0;
     if (sys_data.target_count > 0) {
-        verim_val = (sys_data.produced_count * 100) / sys_data.target_count;
+        verim_val = (sys_data.produced_count * 100 + sys_data.target_count / 2) / sys_data.target_count;
         if (verim_val > 99) verim_val = 99;  // Max 99%
     }
     verim_to_2digits(verim_val, verim);
