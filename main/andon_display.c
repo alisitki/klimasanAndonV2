@@ -19,6 +19,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_attr.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -52,7 +53,7 @@ static volatile int write_buffer = 1;   // Update writes to this
 #define CHAR_U 11  // Some decoders show U at 11
 
 // ============ HC138 Selection (0-5 valid, 6-7 = all off) ============
-void andon_display_select_hane(int hane) {
+static void IRAM_ATTR andon_display_select_hane(int hane) {
     gpio_set_level(HC138_A0_PIN, (hane >> 0) & 1);
     gpio_set_level(HC138_A1_PIN, (hane >> 1) & 1);
     gpio_set_level(HC138_A2_PIN, (hane >> 2) & 1);
@@ -60,7 +61,7 @@ void andon_display_select_hane(int hane) {
 }
 
 // ============ CD4543 BCD Output ============
-void andon_display_send_bcd(int bcd_value) {
+static void IRAM_ATTR andon_display_send_bcd(int bcd_value) {
     gpio_set_level(CD4543_D0_PIN, (bcd_value >> 0) & 1);
     gpio_set_level(CD4543_D1_PIN, (bcd_value >> 1) & 1);
     gpio_set_level(CD4543_D2_PIN, (bcd_value >> 2) & 1);
@@ -290,18 +291,14 @@ void andon_display_update(void) {
     write_buffer = temp;
 }
 
+// LD pin array: static DRAM (flash cache pause'dan etkilenmez)
+static const gpio_num_t s_ld_pins[8] = {
+    CD4543_LD1_PIN, CD4543_LD2_PIN, CD4543_LD3_PIN, CD4543_LD4_PIN,
+    CD4543_LD5_PIN, CD4543_LD6_PIN, CD4543_LD7_PIN, CD4543_LD8_PIN,
+};
+
 // ============ Display Scan Task (Multiplexing) ============
-static void display_scan_task(void *pvParameters) {
-    const gpio_num_t ld_pins[8] = {
-        CD4543_LD1_PIN,
-        CD4543_LD2_PIN,
-        CD4543_LD3_PIN,
-        CD4543_LD4_PIN,
-        CD4543_LD5_PIN,
-        CD4543_LD6_PIN,
-        CD4543_LD7_PIN,
-        CD4543_LD8_PIN,
-    };
+static void IRAM_ATTR display_scan_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "Display multiplexing started (8 latches)");
 
@@ -327,9 +324,9 @@ static void display_scan_task(void *pvParameters) {
                 esp_rom_delay_us(10);
                 
                 // Latch pulse
-                gpio_set_level(ld_pins[latch], 1);
+                gpio_set_level(s_ld_pins[latch], 1);
                 esp_rom_delay_us(10);
-                gpio_set_level(ld_pins[latch], 0);
+                gpio_set_level(s_ld_pins[latch], 0);
                 esp_rom_delay_us(10);
             }
             

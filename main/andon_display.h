@@ -37,16 +37,5 @@ void andon_display_start_task(void);
  */
 void andon_display_update(void);
 
-/**
- * @brief Belirli bir hane seçimi (HC138)
- * @param hane Hane numarası (0-5, 6-7=hepsi kapalı)
- */
-void andon_display_select_hane(int hane);
-
-/**
- * @brief BCD değerini display'e gönder
- * @param bcd_value BCD değeri (0-9, 0x0F=blank)
- */
-void andon_display_send_bcd(int bcd_value);
 
 #endif // ANDON_DISPLAY_H

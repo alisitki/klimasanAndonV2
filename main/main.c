@@ -208,7 +208,7 @@ static void on_button_event(button_event_t event) {
                 // Cycle bar'ı başlat/sıfırla
                 led_strip_start_cycle();
                 
-                nvs_storage_save_state();
+                nvs_storage_save_state_immediate();  // Kritik: Adet kaybolmasin
                 andon_display_update();
             } else {
                 ESP_LOGW(TAG, "Turuncu buton IDLE/PLANNED modda çalışmaz");
