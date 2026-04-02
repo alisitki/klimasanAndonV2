@@ -64,6 +64,11 @@ typedef struct {
     // Menü ayarları yardımcıları
     uint8_t menu_step;          // 0:Kapalı, 1:Parlaklık, 2:Süre
     uint8_t led_brightness_idx; // 1-5 arası parlaklık seviyesi
+    
+    // Durus flash efekti (IDLE<->PLANNED gecislerinde)
+    uint32_t durus_flash_value;   // Flash sirasinda gosterilecek eski durus suresi
+    uint8_t durus_flash_counter;  // Flash kalan saniye (5->0)
+    bool durus_flash_visible;     // Flash blink on/off
 } system_data_t;
 
 // ============ NVS Backup Yapısı ============

@@ -15,10 +15,13 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
+#include "rtc_wdt.h"
 
 // Modüller
 #include "system_state.h"
@@ -29,8 +32,87 @@
 #include "ir_remote.h"
 #include "button_handler.h"
 #include "nvs_storage.h"
+#include "pin_config.h"
 
 static const char *TAG = "klimasan_main";
+
+static const char *mode_name(work_mode_t mode) {
+    switch (mode) {
+    case MODE_WORK:
+        return "WORK";
+    case MODE_IDLE:
+        return "IDLE";
+    case MODE_PLANNED:
+        return "PLANNED";
+    case MODE_STANDBY:
+    default:
+        return "STANDBY";
+    }
+}
+
+static const char *reset_reason_name(esp_reset_reason_t reason) {
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "POWERON";
+    case ESP_RST_EXT:
+        return "EXT";
+    case ESP_RST_SW:
+        return "SW";
+    case ESP_RST_PANIC:
+        return "PANIC";
+    case ESP_RST_INT_WDT:
+        return "INT_WDT";
+    case ESP_RST_TASK_WDT:
+        return "TASK_WDT";
+    case ESP_RST_WDT:
+        return "WDT";
+    case ESP_RST_DEEPSLEEP:
+        return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:
+        return "BROWNOUT";
+    case ESP_RST_SDIO:
+        return "SDIO";
+    case ESP_RST_USB:
+        return "USB";
+    case ESP_RST_JTAG:
+        return "JTAG";
+    case ESP_RST_EFUSE:
+        return "EFUSE";
+    case ESP_RST_PWR_GLITCH:
+        return "PWR_GLITCH";
+    case ESP_RST_CPU_LOCKUP:
+        return "CPU_LOCKUP";
+    case ESP_RST_UNKNOWN:
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static void set_display_safe_startup_state(void) {
+    const gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << HC138_A0_PIN) | (1ULL << HC138_A1_PIN) | (1ULL << HC138_A2_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(HC138_A0_PIN, 1);
+    gpio_set_level(HC138_A1_PIN, 1);
+    gpio_set_level(HC138_A2_PIN, 1);
+}
+
+static void startup_watchdog_feed(void) {
+#ifdef CONFIG_BOOTLOADER_WDT_DISABLE_IN_USER_CODE
+    rtc_wdt_feed();
+#endif
+}
+
+static void startup_watchdog_finish(void) {
+#ifdef CONFIG_BOOTLOADER_WDT_DISABLE_IN_USER_CODE
+    rtc_wdt_disable();
+#endif
+}
 
 // ============ Global Değişken Tanımları ============
 volatile system_data_t sys_data = {0};
@@ -59,10 +141,23 @@ static void update_durus_timer(void) {
     }
 }
 
+static void clear_durus_flash(void) {
+    sys_data.durus_flash_counter = 0;
+    sys_data.durus_flash_visible = true;
+}
+
+static void start_durus_flash(uint32_t frozen_value) {
+    sys_data.durus_flash_value = frozen_value;
+    sys_data.durus_flash_counter = 10;      // 10 * 500ms = 5 saniye
+    sys_data.durus_flash_visible = true;    // Ilk frame'de deger gorunsun
+    sys_data.durus_time = 0;                // Yeni durus sayaci sifirdan baslar
+    sys_data.durus_running = true;          // Flash surerken arka planda saymaya devam etsin
+}
+
 // ============ Mode Değişim Fonksiyonları ============
 
 static void switch_to_work_mode(void) {
-    // Sayaçları aktif et (her ihtimale karşı zorla)
+    // Sayaclari aktif et (her ihtimale karsi zorla)
     sys_data.counting_active = true;
 
     if (current_mode == MODE_WORK) {
@@ -70,21 +165,24 @@ static void switch_to_work_mode(void) {
         return;
     }
     
-    // Duruş timer'ı durdur (frozen value)
+    // Durus timer'i durdur (frozen value)
     stop_durus_timer();
+    clear_durus_flash();
     
     current_mode = MODE_WORK;
-    // Alarm aktifse bar'ı ve buzzer'ı dokunma — sadece MUTE ile susturulur
+    // Cycle bar'i baslat (WORK'e gecince sayma baslar)
     if (!led_strip_is_alarm_active()) {
-        led_strip_clear(); // WORK'e geçince LED barı söndür (adet gelince başlayacak)
+        led_strip_start_cycle();
+    } else {
+        ESP_LOGW(TAG, "Cycle start skipped: alarm latch active");
     }
-    ESP_LOGI(TAG, "🟢 MODE: WORK (Çalışma zamanı sayılıyor)");
+    ESP_LOGI(TAG, "MODE: WORK (Calisma zamani sayiliyor)");
     nvs_storage_save_state_immediate();
     andon_display_update();
 }
 
 static void switch_to_idle_mode(void) {
-    // Sayaçları aktif et
+    // Sayaclari aktif et
     sys_data.counting_active = true;
 
     if (current_mode == MODE_IDLE) {
@@ -92,20 +190,23 @@ static void switch_to_idle_mode(void) {
         return;
     }
     
-    // Duruş timer'ı başlat (eğer daha önce WORK'te idiysek veya Standby'da isek)
-    if (current_mode == MODE_WORK || current_mode == MODE_STANDBY) {
-        sys_data.durus_time = 0;  // Yeni duruş, sıfırdan başla
+    // PLANNED -> IDLE: eski durus suresini 5 saniye flash goster, sonra 0'dan say
+    if (current_mode == MODE_PLANNED) {
+        start_durus_flash(sys_data.durus_time);
+    } else if (current_mode == MODE_WORK || current_mode == MODE_STANDBY) {
+        sys_data.durus_time = 0;
+        clear_durus_flash();
+        start_durus_timer();
     }
-    start_durus_timer();
     
     current_mode = MODE_IDLE;
-    ESP_LOGI(TAG, "🔴 MODE: IDLE (Atıl zaman sayılıyor)");
+    ESP_LOGI(TAG, "MODE: IDLE (Atil zaman sayiliyor)");
     nvs_storage_save_state_immediate();
     andon_display_update();
 }
 
 static void switch_to_planned_mode(void) {
-    // Sayaçları aktif et
+    // Sayaclari aktif et
     sys_data.counting_active = true;
 
     if (current_mode == MODE_PLANNED) {
@@ -113,48 +214,83 @@ static void switch_to_planned_mode(void) {
         return;
     }
     
-    // Duruş timer'ı başlat (eğer daha önce WORK'te idiysek veya Standby'da isek)
-    if (current_mode == MODE_WORK || current_mode == MODE_STANDBY) {
-        sys_data.durus_time = 0;  // Yeni duruş, sıfırdan başla
+    // IDLE -> PLANNED: eski durus suresini 5 saniye flash goster, sonra 0'dan say
+    if (current_mode == MODE_IDLE) {
+        start_durus_flash(sys_data.durus_time);
+    } else if (current_mode == MODE_WORK || current_mode == MODE_STANDBY) {
+        sys_data.durus_time = 0;
+        clear_durus_flash();
+        start_durus_timer();
     }
-    start_durus_timer();
     
     current_mode = MODE_PLANNED;
-    ESP_LOGI(TAG, "🟡 MODE: PLANNED (Planlı duruş sayılıyor)");
+    ESP_LOGI(TAG, "MODE: PLANNED (Planli durus sayiliyor)");
     nvs_storage_save_state_immediate();
     andon_display_update();
 }
 
 // ============ Timer Task (her saniye) ============
 static void timer_task(void *pvParameters) {
-    uint32_t last_rtc_sec = rtc_get_wall_time_seconds();
+    int64_t last_counter_tick_us = esp_timer_get_time();
+    int64_t last_flash_tick_us = last_counter_tick_us;
+    int64_t last_display_refresh_us = last_counter_tick_us;
+    work_mode_t last_counter_mode = current_mode;
+    uint32_t save_counter = 0;
     
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(200));  // 200ms yoklama — RTC saniye degisimini yakala
-        
-        uint32_t now_sec = rtc_get_wall_time_seconds();
-        
-        // RTC saniyesi degismemisse sadece display guncelle
-        if (now_sec == last_rtc_sec) {
-            andon_display_update();
-            continue;
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        int64_t now_us = esp_timer_get_time();
+        bool display_dirty = false;
+
+        // Flash 500ms fazini RTC yerine monotonic zamandan yurüt.
+        int64_t flash_elapsed_us = now_us - last_flash_tick_us;
+        if (flash_elapsed_us >= 500000) {
+            uint32_t flash_steps = (uint32_t)(flash_elapsed_us / 500000);
+            last_flash_tick_us += (int64_t)flash_steps * 500000;
+            while (flash_steps-- > 0 && sys_data.durus_flash_counter > 0) {
+                sys_data.durus_flash_counter--;
+                sys_data.durus_flash_visible = !sys_data.durus_flash_visible;
+                display_dirty = true;
+            }
         }
         
-        // Kac saniye gecti? (normalde 1, ama tikanma olursa >1 olabilir)
-        uint32_t elapsed = now_sec - last_rtc_sec;
-        last_rtc_sec = now_sec;
-        
-        // Ekran kapali / sayac pasif / standby / shift durdurulmus
-        if (!sys_data.screen_on || !sys_data.counting_active || 
-            current_mode == MODE_STANDBY || shift_state == SHIFT_STOPPED) {
-            andon_display_update();
+        // Saat ayari sirasinda sayaç bazini sifirla; clock display ayrica yenilenir.
+        if (sys_data.clock_step > 0) {
+            last_counter_tick_us = now_us;
+            last_counter_mode = current_mode;
+            if (display_dirty || (now_us - last_display_refresh_us) >= 250000) {
+                andon_display_update();
+                last_display_refresh_us = now_us;
+            }
             continue;
         }
-        
-        // Gecen her saniye icin sayac artir
-        taskENTER_CRITICAL(&sys_data_mux);
-        for (uint32_t i = 0; i < elapsed; i++) {
-            switch (current_mode) {
+
+        bool counter_active = sys_data.screen_on &&
+                              sys_data.counting_active &&
+                              current_mode != MODE_STANDBY &&
+                              shift_state == SHIFT_RUNNING;
+
+        // Sayaç kapaliysa veya mod yeni degistiyse baz zamani sifirla.
+        if (!counter_active || current_mode != last_counter_mode) {
+            last_counter_tick_us = now_us;
+            last_counter_mode = current_mode;
+            if (display_dirty || (now_us - last_display_refresh_us) >= 250000) {
+                andon_display_update();
+                last_display_refresh_us = now_us;
+            }
+            continue;
+        }
+
+        int64_t counter_elapsed_us = now_us - last_counter_tick_us;
+        uint32_t elapsed_sec = (uint32_t)(counter_elapsed_us / 1000000);
+        if (elapsed_sec > 0) {
+            last_counter_tick_us += (int64_t)elapsed_sec * 1000000;
+            last_counter_mode = current_mode;
+
+            taskENTER_CRITICAL(&sys_data_mux);
+            for (uint32_t i = 0; i < elapsed_sec; i++) {
+                switch (current_mode) {
                 case MODE_STANDBY:
                     break;
                 case MODE_WORK:
@@ -168,25 +304,33 @@ static void timer_task(void *pvParameters) {
                     sys_data.planned_time++;
                     update_durus_timer();
                     break;
+                }
             }
+            taskEXIT_CRITICAL(&sys_data_mux);
+
+            save_counter += elapsed_sec;
+            while (save_counter >= 15) {
+                save_counter -= 15;
+                nvs_storage_save_state();
+            }
+
+            display_dirty = true;
         }
-        taskEXIT_CRITICAL(&sys_data_mux);
-        
-        // Display guncelle (saat ve sayaclar ayni anda)
-        andon_display_update();
-        
-        // Periyodik NVS kayit (~15 saniyede bir)
-        static uint8_t save_counter = 0;
-        save_counter += elapsed;
-        if (save_counter >= 15) {
-            save_counter = 0;
-            nvs_storage_save_state();
+
+        if (display_dirty || (now_us - last_display_refresh_us) >= 250000) {
+            andon_display_update();
+            last_display_refresh_us = now_us;
         }
     }
 }
 
 // ============ Buton Callback ============
 static void on_button_event(button_event_t event) {
+    if (shift_state == SHIFT_STOPPED) {
+        ESP_LOGI(TAG, "Button ignored: shift stopped");
+        return;
+    }
+
     switch (event) {
         case BUTTON_EVENT_GREEN:
             // Yeşil buton: WORK moduna geç
@@ -206,19 +350,24 @@ static void on_button_event(button_event_t event) {
         case BUTTON_EVENT_ORANGE:
             // Turuncu buton: Adet +1 (sadece WORK modunda)
             if (current_mode == MODE_WORK) {
+                // Alarm aktifse sustur (MUTE yerine turuncu ile)
+                if (led_strip_is_alarm_active()) {
+                    led_strip_acknowledge_alarm();
+                }
+                
                 taskENTER_CRITICAL(&sys_data_mux);
                 sys_data.produced_count++;
                 taskEXIT_CRITICAL(&sys_data_mux);
-                ESP_LOGI(TAG, "🟠 Adet: %lu / %lu", 
+                ESP_LOGI(TAG, "Adet: %lu / %lu", 
                          (unsigned long)sys_data.produced_count, (unsigned long)sys_data.target_count);
                 
-                // Cycle bar'ı başlat/sıfırla
+                // Cycle bar'i baslat/sifirla
                 led_strip_start_cycle();
                 
                 nvs_storage_save_state_immediate();  // Kritik: Adet kaybolmasin
                 andon_display_update();
             } else {
-                ESP_LOGW(TAG, "Turuncu buton IDLE/PLANNED modda çalışmaz");
+                ESP_LOGW(TAG, "Turuncu buton IDLE/PLANNED modda calismaz");
             }
             break;
             
@@ -261,9 +410,30 @@ static int8_t decode_ir_digit(uint8_t address, uint8_t command) {
 }
 
 static void on_ir_command(uint8_t address, uint8_t command) {
-    ESP_LOGI(TAG, "IR: Addr=0x%02X, Cmd=0x%02X", address, command);
+    ESP_LOGD(TAG, "IR raw: Addr=0x%02X, Cmd=0x%02X", address, command);
     
     ir_input_mode_t input_mode = ir_remote_get_input_mode();
+
+    // Vardiya Durdur/Başlat (0xFC, 0x1D)
+    // Freeze aktifken sadece ayni tus ile cikisa izin ver.
+    if (address == 0xFC && command == 0x1D) {
+        if (shift_state == SHIFT_RUNNING) {
+            shift_state = SHIFT_STOPPED;
+            led_strip_pause_cycle();
+            ESP_LOGI(TAG, "IR: Vardiya DURDURULDU (ekran donuk)");
+        } else {
+            shift_state = SHIFT_RUNNING;
+            led_strip_resume_cycle();
+            ESP_LOGI(TAG, "IR: Vardiya BASLATILDI");
+        }
+        nvs_storage_save_state_immediate();
+        return;
+    }
+
+    if (shift_state == SHIFT_STOPPED) {
+        ESP_LOGI(TAG, "IR ignored: shift stopped");
+        return;
+    }
 
     // ========== MENÜ/SAAT AYARI LOCKOUT ==========
     // Eğer LED Menü modundaysak, sadece LED ayar tuşlarını işle
@@ -356,6 +526,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
             sys_data.produced_count = 0;
             sys_data.durus_time = 0;
             sys_data.durus_running = false;
+            clear_durus_flash();
             current_mode = MODE_STANDBY;
             
             // Hedef adet NVS'den yükle
@@ -450,6 +621,9 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     // 0xD8, 0x1D → Mavi → Adet +1 (Sadece WORK modunda ve Sayaç aktifken)
     if (address == 0xD8 && command == 0x1D) {
         if (current_mode == MODE_WORK && sys_data.counting_active) {
+            if (led_strip_is_alarm_active()) {
+                led_strip_acknowledge_alarm();
+            }
             sys_data.produced_count++;
             ESP_LOGI(TAG, "IR: Mavi → Adet: %lu / %lu", 
                      (unsigned long)sys_data.produced_count, (unsigned long)sys_data.target_count);
@@ -467,13 +641,6 @@ static void on_ir_command(uint8_t address, uint8_t command) {
     // Hedef Sıfırlama (0xFE address)
     // MUTE / SIFIRLA (0xFF, 0x02 veya 0xFE adresi)
     if ((address == 0xFF && command == 0x02) || (address == 0xFE)) {
-        // Eğer alarm aktifse SADECE sustur (sıfırlama yapma)
-        if (led_strip_is_alarm_active()) {
-            led_strip_acknowledge_alarm();
-            ESP_LOGI(TAG, "IR: MUTE -> Alarm susturuldu");
-            return;
-        }
-
         if (sys_data.menu_step == 2) {
             led_strip_set_cycle_target(0);
             ESP_LOGI(TAG, "IR: Menu -> LED Süre sıfırlandı");
@@ -488,21 +655,6 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         return;
     }
     
-
-    
-    // Vardiya Durdur/Başlat (0xFC, 0x1D)
-    if (address == 0xFC && command == 0x1D) {
-        if (shift_state == SHIFT_RUNNING) {
-            shift_state = SHIFT_STOPPED;
-            ESP_LOGI(TAG, "IR: Vardiya DURDURULDU (ekran donuk)");
-        } else {
-            shift_state = SHIFT_RUNNING;
-            ESP_LOGI(TAG, "IR: Vardiya BAŞLATILDI");
-        }
-        nvs_storage_save_state_immediate();
-        return;
-    }
-    
     // Ekran Reset
     if ((address == 0xFF && command == 0xC0) || (address == 0xC0)) {
         sys_data.work_time = 0;
@@ -511,6 +663,7 @@ static void on_ir_command(uint8_t address, uint8_t command) {
         sys_data.produced_count = 0;
         sys_data.durus_time = 0;
         sys_data.durus_running = false;
+        clear_durus_flash();
         current_mode = MODE_IDLE;
         led_strip_clear();
         nvs_storage_save_state_immediate();
@@ -697,27 +850,40 @@ static void power_on_recovery(void) {
 
 // ============ Main Entry Point ============
 void app_main(void) {
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  KlimasanAndonV2 Starting...");
-    ESP_LOGI(TAG, "========================================");
+    set_display_safe_startup_state();
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "KlimasanAndonV2 booting (reset=%s)", reset_reason_name(reset_reason));
+    if (reset_reason == ESP_RST_WDT || reset_reason == ESP_RST_INT_WDT ||
+        reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_BROWNOUT ||
+        reset_reason == ESP_RST_PWR_GLITCH) {
+        ESP_LOGW(TAG, "Previous boot was incomplete or power was unstable");
+    }
+    startup_watchdog_feed();
     
     // 1. NVS başlat
     nvs_storage_init();
+    startup_watchdog_feed();
     
     // 2. RTC başlat (I2C)
     rtc_ds1307_init();
+    startup_watchdog_feed();
     
     // 3. IR task için watchdog'u disable et
     esp_task_wdt_deinit();
     
     // 4. Power-on recovery
     power_on_recovery();
+    startup_watchdog_feed();
     
     // 5. Modülleri başlat
     andon_display_init();
+    startup_watchdog_feed();
     led_strip_init();
+    startup_watchdog_feed();
     ir_remote_init();
+    startup_watchdog_feed();
     button_handler_init();
+    startup_watchdog_feed();
     
     // 6. Callback'leri ayarla
     button_handler_set_callback(on_button_event);
@@ -736,10 +902,8 @@ void app_main(void) {
     
     // Timer task (Core 0, Priority 4 - Display ile aynı çekirdek ama altında)
     xTaskCreatePinnedToCore(timer_task, "timer_task", 4096, NULL, 4, NULL, 0);
+    startup_watchdog_feed();
     
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  System Ready!");
-    ESP_LOGI(TAG, "  Mode: %s", current_mode == MODE_WORK ? "WORK" : 
-                                 current_mode == MODE_IDLE ? "IDLE" : "PLANNED");
-    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Ready (mode=%s)", mode_name(current_mode));
+    startup_watchdog_finish();
 }

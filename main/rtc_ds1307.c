@@ -98,7 +98,7 @@ esp_err_t rtc_ds1307_init(void) {
         return ret;
     }
     
-    ESP_LOGI(TAG, "I2C initialized");
+    ESP_LOGD(TAG, "I2C initialized");
 
     ds1307_start_if_halted();
 
@@ -107,7 +107,7 @@ esp_err_t rtc_ds1307_init(void) {
         ds1307_available = true;
         struct tm tm_buf;
         localtime_r(&ds_now, &tm_buf);
-        ESP_LOGI(TAG, "DS1307 RTC ready (epoch=%lld, %04d-%02d-%02d %02d:%02d:%02d)",
+        ESP_LOGD(TAG, "DS1307 RTC ready (epoch=%lld, %04d-%02d-%02d %02d:%02d:%02d)",
                  (long long)ds_now,
                  tm_buf.tm_year + 1900,
                  tm_buf.tm_mon + 1,
@@ -171,9 +171,19 @@ esp_err_t rtc_ds1307_read_tm(struct tm *out) {
         .tm_hour = hour_dec,
         .tm_mday = bcd_to_bin(raw[4] & 0x3FU),
         .tm_mon = bcd_to_bin(raw[5] & 0x1FU) - 1,
-        .tm_year = bcd_to_bin(raw[6]) + 100,  // DS1307 stores 0-99 → 2000+
+        .tm_year = bcd_to_bin(raw[6]) + 100,  // DS1307 stores 0-99 -> 2000+
         .tm_isdst = -1,
     };
+
+    // Validate: gecersiz tm degerlerini engelle (mktime sonsuz donguye girebilir)
+    if (tm_snapshot.tm_sec > 59 || tm_snapshot.tm_min > 59 || tm_snapshot.tm_hour > 23 ||
+        tm_snapshot.tm_mday < 1 || tm_snapshot.tm_mday > 31 ||
+        tm_snapshot.tm_mon < 0 || tm_snapshot.tm_mon > 11) {
+        ESP_LOGW(TAG, "RTC invalid: %02d:%02d:%02d %d/%d",
+                 tm_snapshot.tm_hour, tm_snapshot.tm_min, tm_snapshot.tm_sec,
+                 tm_snapshot.tm_mon + 1, tm_snapshot.tm_mday);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
 
     *out = tm_snapshot;
     return ESP_OK;

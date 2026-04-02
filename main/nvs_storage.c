@@ -30,7 +30,7 @@ static void nvs_save_task(void *pvParameters) {
     uint32_t last_save_time = 0;
     uint8_t msg;
     
-    ESP_LOGI(TAG, "NVS save task started (Core 0)");
+    ESP_LOGD(TAG, "NVS save task started (Core 0)");
     
     while (1) {
         if (xQueueReceive(nvs_save_queue, &msg, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -42,9 +42,9 @@ static void nvs_save_task(void *pvParameters) {
                 nvs_handle_t my_handle;
                 esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
                 if (err == ESP_OK) {
-                    // valid=0: yazim basliyor
+                    // Tek commit ile yaz: flash stall suresini kisalt.
+                    // Power-cut olursa eski commitli veri korunur, yeni veri ancak commit sonunda gecerli olur.
                     nvs_set_u8(my_handle, "valid", 0);
-                    nvs_commit(my_handle);
 
                     nvs_set_u8(my_handle, "work_mode", (uint8_t)current_mode);
                     nvs_set_u8(my_handle, "shift_state", (uint8_t)shift_state);
@@ -57,7 +57,7 @@ static void nvs_save_task(void *pvParameters) {
                     nvs_set_u32(my_handle, "durus_time", sys_data.durus_time);
                     nvs_set_u32(my_handle, "last_update", rtc_get_wall_time_seconds());
 
-                    // valid=1: tum veriler yazildi
+                    // valid=1: tum veriler tek seferde commit edilir
                     nvs_set_u8(my_handle, "valid", 1);
                     nvs_commit(my_handle);
                     nvs_close(my_handle);
@@ -85,14 +85,14 @@ esp_err_t nvs_storage_init(void) {
     // Create save queue
     nvs_save_queue = xQueueCreate(1, sizeof(uint8_t));
     
-    ESP_LOGI(TAG, "NVS initialized");
+    ESP_LOGD(TAG, "NVS initialized");
     return ESP_OK;
 }
 
 void nvs_storage_start_task(void) {
     // Core 0'da calistir: flash yazarken Core 1 (display degil) suspend edilir
     xTaskCreatePinnedToCore(nvs_save_task, "nvs_save", 2048, NULL, 1, NULL, 0);
-    ESP_LOGI(TAG, "NVS save task started (Core 0, Priority 1)");
+    ESP_LOGD(TAG, "NVS save task started (Core 0, Priority 1)");
 }
 
 void nvs_storage_save_target(uint32_t target) {
@@ -114,7 +114,7 @@ uint32_t nvs_storage_load_target(void) {
         nvs_get_u32(my_handle, "target_cnt", &target);
         nvs_close(my_handle);
     }
-    ESP_LOGI(TAG, "Target loaded: %lu", (unsigned long)target);
+    ESP_LOGD(TAG, "Target loaded: %lu", (unsigned long)target);
     return target;
 }
 
@@ -138,7 +138,7 @@ uint32_t nvs_storage_load_cycle_target(void) {
         nvs_close(my_handle);
     }
     if (seconds < 1) seconds = DEFAULT_CYCLE_TARGET_SEC;
-    ESP_LOGI(TAG, "Cycle target loaded: %lu sec", (unsigned long)seconds);
+    ESP_LOGD(TAG, "Cycle target loaded: %lu sec", (unsigned long)seconds);
     return seconds;
 }
 
@@ -162,7 +162,7 @@ uint8_t nvs_storage_load_brightness(void) {
         nvs_close(my_handle);
     }
     if (level < 1 || level > 5) level = 3;
-    ESP_LOGI(TAG, "Brightness level loaded: %d", level);
+    ESP_LOGD(TAG, "Brightness level loaded: %d", level);
     return level;
 }
 
@@ -201,7 +201,7 @@ system_state_backup_t nvs_storage_load_state(void) {
             nvs_get_u32(my_handle, "durus_time", &state.durus_t);
             nvs_get_u32(my_handle, "last_update", &state.last_upd);
             
-            ESP_LOGI(TAG, "State loaded (Mode:%d, Work:%lu, Prod:%lu)", 
+            ESP_LOGD(TAG, "State loaded (Mode:%d, Work:%lu, Prod:%lu)",
                      state.work_mode, (unsigned long)state.work_t, (unsigned long)state.prod_cnt);
         } else {
             ESP_LOGW(TAG, "NVS: work_mode not found, fresh start");

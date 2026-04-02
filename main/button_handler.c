@@ -25,9 +25,8 @@ static button_callback_t g_button_callback = NULL;
 
 static void button_task(void *pvParameters) {
     // active_level: buton basıldığında GPIO'nun aldığı değer
-    // NO (Normal-Open, aktif-LOW) = 0
-    // NC (Normal-Closed, aktif-HIGH) = 1  ← Kırmızı buton NC kontak
-    const uint8_t active_level[4] = {0, 1, 0, 0}; // Yeşil, Kırmızı, Sarı, Turuncu
+    // Tum butonlar NO (Normal-Open, aktif-LOW) = 0
+    const uint8_t active_level[4] = {0, 0, 0, 0}; // Yeşil, Kırmızı, Sarı, Turuncu
 
     // Başlangıç durumu: buton bırakılmış (idle) seviyesi = 1 - active_level
     uint8_t last_state[4] = {
@@ -56,23 +55,12 @@ static void button_task(void *pvParameters) {
 
     const char *btn_names[4] = {"GREEN", "RED", "YELLOW", "ORANGE"};
 
-    ESP_LOGI(TAG, "Button task started (4 buttons, RED=NC)");
+    ESP_LOGD(TAG, "Button task started (4 buttons, RED=NC)");
 
     while (1) {
         vTaskDelay(10 / portTICK_PERIOD_MS);
 
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-        // === DIAGNOSIS: Her 2 saniyede ham GPIO değerlerini logla ===
-        static uint32_t diag_counter = 0;
-        if (++diag_counter >= 200) {  // 200 * 10ms = 2 saniye
-            diag_counter = 0;
-            ESP_LOGI(TAG, "BTN RAW: GREEN(G%d)=%d  RED(G%d)=%d  YELLOW(G%d)=%d  ORANGE(G%d)=%d",
-                btn_pins[0], gpio_get_level(btn_pins[0]),
-                btn_pins[1], gpio_get_level(btn_pins[1]),
-                btn_pins[2], gpio_get_level(btn_pins[2]),
-                btn_pins[3], gpio_get_level(btn_pins[3]));
-        }
 
         for (int i = 0; i < 4; i++) {
             uint8_t raw = gpio_get_level(btn_pins[i]);
@@ -121,7 +109,7 @@ static void gpio_init_buttons(void) {
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
     };
     gpio_config(&io_conf_buttons);
-    ESP_LOGI(TAG, "Button GPIO initialized (Pins %d, %d, %d, %d)", 
+    ESP_LOGD(TAG, "Button GPIO initialized (Pins %d, %d, %d, %d)",
              BUTTON_GREEN_PIN, BUTTON_RED_PIN, BUTTON_YELLOW_PIN, BUTTON_ORANGE_PIN);
 }
 
@@ -129,7 +117,7 @@ static void gpio_init_buttons(void) {
 
 esp_err_t button_handler_init(void) {
     gpio_init_buttons();
-    ESP_LOGI(TAG, "Button handler initialized");
+    ESP_LOGD(TAG, "Button handler initialized");
     return ESP_OK;
 }
 
@@ -139,7 +127,7 @@ void button_handler_start_task(void) {
     if (ret != pdPASS || handle == NULL) {
         ESP_LOGE(TAG, "Button task creation FAILED! ret=%d", ret);
     } else {
-        ESP_LOGI(TAG, "Button task started (Core 1, Priority 6, Stack 8192)");
+        ESP_LOGD(TAG, "Button task started (Core 1, Priority 6, Stack 8192)");
     }
 }
 

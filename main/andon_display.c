@@ -117,15 +117,19 @@ static void count_to_4digits(uint32_t value, uint8_t out[4]) {
     }
 }
 
-// ============ Helper: Verim to 2 digits ============
-static void verim_to_2digits(uint32_t verim, uint8_t out[2]) {
-    verim = verim % 100;  // Max 99
+// ============ Helper: Verim to 3 digits ============
+static void verim_to_3digits(uint32_t verim, uint8_t out[3]) {
+    verim = verim % 1000;  // Max 999
     out[0] = verim % 10;
-    out[1] = verim / 10;
+    out[1] = (verim / 10) % 10;
+    out[2] = verim / 100;
     
-    // Eğer onlar basamağı 0 ise kapat (blank)
-    if (out[1] == 0) {
-        out[1] = DISPLAY_BLANK;
+    // Onlar ve yuzler basamagi 0 ise kapat (blank)
+    if (out[2] == 0) {
+        out[2] = DISPLAY_BLANK;
+        if (out[1] == 0) {
+            out[1] = DISPLAY_BLANK;
+        }
     }
 }
 
@@ -138,7 +142,7 @@ void andon_display_update(void) {
     uint8_t planli[6];      // LD5: Planlı duruş
     uint8_t hedef[4];       // LD6: Hedef adet
     uint8_t gerceklesen[4]; // LD7: Gerçekleşen adet
-    uint8_t verim[2];       // LD8: Verim %
+    uint8_t verim[3];       // LD8: Verim % (3 hane)
     
     // LD1: SAAT - RTC'den al
     struct tm tm_now;
@@ -185,7 +189,16 @@ void andon_display_update(void) {
     }
     
     // LD2: DURUŞ SÜRESİ (MM:SS)
-    time_to_4digits(sys_data.durus_time, durus);
+    if (sys_data.durus_flash_counter > 0) {
+        // Normal blink: sys_data uzerinden senkronize 500ms on/off (1 Hz)
+        if (sys_data.durus_flash_visible) {
+            time_to_4digits(sys_data.durus_flash_value, durus);
+        } else {
+            memset(durus, DISPLAY_BLANK, sizeof(durus));
+        }
+    } else {
+        time_to_4digits(sys_data.durus_time, durus);
+    }
     
     // LD3: ÇALIŞMA ZAMANI
     time_to_6digits(sys_data.work_time, calisma);
@@ -206,9 +219,9 @@ void andon_display_update(void) {
     uint32_t verim_val = 0;
     if (sys_data.target_count > 0) {
         verim_val = (sys_data.produced_count * 100 + sys_data.target_count / 2) / sys_data.target_count;
-        if (verim_val > 99) verim_val = 99;  // Max 99%
+        if (verim_val > 999) verim_val = 999;  // Max 999%
     }
-    verim_to_2digits(verim_val, verim);
+    verim_to_3digits(verim_val, verim);
     
     // ========== MENÜ AYAR EKRANI MODU ==========
     if (sys_data.menu_step > 0) {
@@ -277,9 +290,9 @@ void andon_display_update(void) {
             SCAN_DATA_WRITE[scan][6] = DISPLAY_BLANK;
         }
         
-        // LD8: VERİM (2 hane, SOLA YASLI)
-        if (scan >= 4) {
-            SCAN_DATA_WRITE[scan][7] = verim[scan - 4];
+        // LD8: VERİM (3 hane, SOLA YASLI)
+        if (scan >= 3) {
+            SCAN_DATA_WRITE[scan][7] = verim[scan - 3];
         } else {
             SCAN_DATA_WRITE[scan][7] = DISPLAY_BLANK;
         }
@@ -300,7 +313,7 @@ static const gpio_num_t s_ld_pins[8] = {
 // ============ Display Scan Task (Multiplexing) ============
 static void IRAM_ATTR display_scan_task(void *pvParameters) {
 
-    ESP_LOGI(TAG, "Display multiplexing started (8 latches)");
+    ESP_LOGD(TAG, "Display multiplexing started (8 latches)");
 
     while (1) {
         // Ekran kapalıysa hiçbir şey gösterme
@@ -354,6 +367,9 @@ static void gpio_init_display(void) {
         .mode = GPIO_MODE_OUTPUT,
     };
     gpio_config(&io_conf_hc138);
+    gpio_set_level(HC138_A0_PIN, 1);
+    gpio_set_level(HC138_A1_PIN, 1);
+    gpio_set_level(HC138_A2_PIN, 1);
     
     // CD4543 data pinleri output
     gpio_config_t io_conf_cd4543_data = {
@@ -383,7 +399,7 @@ static void gpio_init_display(void) {
     gpio_set_level(CD4543_LD7_PIN, 0);
     gpio_set_level(CD4543_LD8_PIN, 0);
     
-    ESP_LOGI(TAG, "Display GPIO initialized (8 latches)");
+    ESP_LOGD(TAG, "Display GPIO initialized (8 latches, HC138=111)");
 }
 
 // ============ Public Functions ============
@@ -391,11 +407,11 @@ static void gpio_init_display(void) {
 esp_err_t andon_display_init(void) {
     gpio_init_display();
     andon_display_update();
-    ESP_LOGI(TAG, "Andon display initialized");
+    ESP_LOGD(TAG, "Andon display initialized");
     return ESP_OK;
 }
 
 void andon_display_start_task(void) {
     xTaskCreatePinnedToCore(display_scan_task, "display_scan", 4096, NULL, 20, NULL, 0);
-    ESP_LOGI(TAG, "Display scan task started (Core 0, Priority 20)");
+    ESP_LOGD(TAG, "Display scan task started (Core 0, Priority 20)");
 }

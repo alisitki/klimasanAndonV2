@@ -27,7 +27,8 @@
 static const char *TAG = "led_strip";
 
 // ============ LED Pixel Buffer ============
-static uint8_t led_strip_pixels[LED_STRIP_LED_COUNT * 3];
+static uint8_t led_strip_render_pixels[LED_STRIP_LED_COUNT * 3];
+static uint8_t led_strip_tx_pixels[LED_STRIP_LED_COUNT * 3];
 
 // ============ RMT Handles ============
 static rmt_channel_handle_t g_led_chan = NULL;
@@ -52,9 +53,10 @@ static volatile uint32_t g_cycle_target_sec = DEFAULT_CYCLE_TARGET_SEC;
 static volatile uint32_t g_cycle_elapsed = 0;  
 static volatile uint32_t g_frame_counter = 0;   
 static volatile bool g_cycle_running = false;
+static volatile bool g_cycle_paused = false;    // Vardiya durdurulunca cycle dondurmak icin
 static volatile bool g_alarm_active = false;
 static volatile bool g_alarm_acknowledged = false;
-static volatile bool g_buzzer_forced_on = false; // Alarm MUTE'a kadar bekleniyor (cycle resetinden etkilenmez)
+static volatile bool g_buzzer_forced_on = false;
 static bool g_menu_preview = false;
 
 // Parlaklık kademeleri (1-5)
@@ -67,23 +69,35 @@ static void set_rgb(int idx, uint8_t r, uint8_t g, uint8_t b) {
     int base = idx * 3;
     float br = g_brightness;
     // GRB format for WS2812
-    led_strip_pixels[base + 0] = (uint8_t)(g * br);
-    led_strip_pixels[base + 1] = (uint8_t)(r * br);
-    led_strip_pixels[base + 2] = (uint8_t)(b * br);
+    led_strip_render_pixels[base + 0] = (uint8_t)(g * br);
+    led_strip_render_pixels[base + 1] = (uint8_t)(r * br);
+    led_strip_render_pixels[base + 2] = (uint8_t)(b * br);
 }
 
 static void transmit_leds(void) {
     if (g_led_chan == NULL || g_led_encoder == NULL) return;
     
-    rmt_transmit_config_t tx_config = {.loop_count = 0};
-    esp_err_t ret = rmt_transmit(g_led_chan, g_led_encoder, led_strip_pixels,
-                                 sizeof(led_strip_pixels), &tx_config);
+    // RMT encode islemi payload'i iletim boyunca kullanabildigi icin
+    // anlik render buffer'i yerine sabit bir TX snapshot gonder.
+    memcpy(led_strip_tx_pixels, led_strip_render_pixels, sizeof(led_strip_tx_pixels));
+
+    rmt_transmit_config_t tx_config = {
+        .loop_count = 0,
+        .flags.eot_level = 0,
+    };
+    esp_err_t ret = rmt_transmit(g_led_chan, g_led_encoder, led_strip_tx_pixels,
+                                 sizeof(led_strip_tx_pixels), &tx_config);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "rmt_transmit failed: %s", esp_err_to_name(ret));
         return;
     }
-    // Wait for transmit to complete
-    ret = rmt_tx_wait_all_done(g_led_chan, pdMS_TO_TICKS(100)); // 30 FPS is 33ms, 100ms is more than safe
+    // API ms bekliyor, tick degil. Timeout olursa buffer yeniden yazilmadan once
+    // kanali mutlaka bosalt ki WS2812 verisi yarim/karisik kalmasin.
+    ret = rmt_tx_wait_all_done(g_led_chan, 100);
+    if (ret == ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG, "rmt_tx_wait timeout, forcing sync");
+        ret = rmt_tx_wait_all_done(g_led_chan, -1);
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "rmt_tx_wait failed: %s", esp_err_to_name(ret));
     }
@@ -117,7 +131,7 @@ static void render_cycle_bar(float ratio) {
 }
 
 static void clear_all_leds(void) {
-    memset(led_strip_pixels, 0, sizeof(led_strip_pixels));
+    memset(led_strip_render_pixels, 0, sizeof(led_strip_render_pixels));
 }
 
 // ============ Buzzer Control ============
@@ -147,14 +161,19 @@ static void led_strip_task(void *arg) {
     bool blink_state = true;
     bool last_running = false;
     
-    ESP_LOGI(TAG, "LED task started (Core 1, 30 FPS)");
+    ESP_LOGD(TAG, "LED task started (Core 1, 30 FPS)");
 
     while (1) {
         if (g_menu_preview) {
             render_cycle_bar(1.0f);
             transmit_leds();
             last_running = true;
-        } else if (g_cycle_running) {
+        } else if (g_cycle_running && g_cycle_paused) {
+            // Dondurma modunda son gonderilen frame'i koru.
+            // WS2812 veriyi tuttugu icin yeni veri gondermiyoruz, bar oldugu yerde kaliyor.
+            last_running = true;
+            buzzer_off();
+        } else if (g_cycle_running && !g_cycle_paused) {
             // Sadece WORK modunda sayaç ilerler
             if (current_mode == MODE_WORK) {
                 last_running = true;
@@ -172,7 +191,7 @@ static void led_strip_task(void *arg) {
             }
             
             // Alt-saniye hassasiyeti (sub-second precision) ile ratio hesapla
-            // Bu sayede 107 LED saniye atlamadan, tek tek (smooth) ilerler
+            // Bu sayede 108 LED saniye atlamadan, tek tek (smooth) ilerler
             float ratio = 0.0f;
             if (g_cycle_target_sec > 0) {
                 ratio = ((float)g_cycle_elapsed + ((float)g_frame_counter / 30.0f)) / (float)g_cycle_target_sec;
@@ -181,7 +200,7 @@ static void led_strip_task(void *arg) {
             if (ratio > 1.0f && !g_alarm_acknowledged) {
                 // Cycle asimi: alarm aktif
                 g_alarm_active = true;
-                g_buzzer_forced_on = true;  // MUTE basılana kadar koru
+                g_buzzer_forced_on = true;  // Adet artirma ile susturulana kadar koru
                 blink_counter++;
                 if (blink_counter >= 15) {
                     blink_state = !blink_state;
@@ -199,7 +218,7 @@ static void led_strip_task(void *arg) {
                 // Normal mod (ya da alarm acknowledge edildi)
                 g_alarm_active = false;
                 if (g_buzzer_forced_on) {
-                    // Alarm onceki cycle'dan tasindi, MUTE bekliyor — buzzer blink devam eder
+                    // Alarm onceki cycle'dan tasindi, adet artirma bekliyor — buzzer blink devam eder
                     blink_counter++;
                     if (blink_counter >= 15) {
                         blink_state = !blink_state;
@@ -251,9 +270,11 @@ esp_err_t led_strip_init(void) {
     rmt_tx_channel_config_t tx_chan_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .gpio_num = LED_STRIP_GPIO_NUM,
-        .mem_block_symbols = 64,
+        // Daha buyuk RMT buffer, uzun WS2812 frame'lerinde refill baskisini azaltir.
+        .mem_block_symbols = 256,
         .resolution_hz = LED_STRIP_RMT_RES_HZ,
-        .trans_queue_depth = 4,
+        .trans_queue_depth = 1,
+        .flags.init_level = 0,
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &g_led_chan));
 
@@ -265,10 +286,11 @@ esp_err_t led_strip_init(void) {
 
     buzzer_init();
 
-    memset(led_strip_pixels, 0, sizeof(led_strip_pixels));
+    memset(led_strip_render_pixels, 0, sizeof(led_strip_render_pixels));
+    memset(led_strip_tx_pixels, 0, sizeof(led_strip_tx_pixels));
     transmit_leds();
 
-    ESP_LOGI(TAG, "LED strip initialized (GPIO %d, %d LEDs)", 
+    ESP_LOGD(TAG, "LED strip initialized (GPIO %d, %d LEDs)",
              LED_STRIP_GPIO_NUM, LED_STRIP_LED_COUNT);
     return ESP_OK;
 }
@@ -287,9 +309,10 @@ void led_strip_start_cycle(void) {
     g_cycle_elapsed = 0;
     g_frame_counter = 0;
     g_cycle_running = true;
+    g_cycle_paused = false;
     g_alarm_active = false;
     g_alarm_acknowledged = false;  // Yeni cycle icin alarm algilama sifirla
-    // g_buzzer_forced_on: dokunma — sadece MUTE (led_strip_acknowledge_alarm) temizler
+    // g_buzzer_forced_on: dokunma — sadece adet artirma (led_strip_acknowledge_alarm) temizler
     ESP_LOGI(TAG, "Cycle started (%lu sec, buzzer_forced=%d)", (unsigned long)g_cycle_target_sec, g_buzzer_forced_on);
 }
 
@@ -308,12 +331,18 @@ bool led_strip_is_alarm_active(void) {
 void led_strip_acknowledge_alarm(void) {
     g_alarm_acknowledged = true;
     g_alarm_active = false;
-    g_buzzer_forced_on = false;  // MUTE: zorla buzzer'i kapat
+    g_buzzer_forced_on = false;
     buzzer_off();
 }
 
 void led_strip_clear(void) {
     g_cycle_running = false;
+    g_cycle_paused = false;
+    g_cycle_elapsed = 0;
+    g_frame_counter = 0;
+    g_alarm_active = false;
+    g_alarm_acknowledged = false;
+    g_buzzer_forced_on = false;
     g_menu_preview = false;
     buzzer_off();
 }
@@ -326,4 +355,12 @@ void led_strip_set_brightness_idx(uint8_t index) {
     if (index >= 1 && index <= 5) {
         g_brightness = brightness_levels[index];
     }
+}
+
+void led_strip_pause_cycle(void) {
+    g_cycle_paused = true;
+}
+
+void led_strip_resume_cycle(void) {
+    g_cycle_paused = false;
 }

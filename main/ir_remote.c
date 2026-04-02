@@ -57,7 +57,7 @@ static void ir_parse_nec_code(uint32_t code) {
         return;
     }
     
-    ESP_LOGI(TAG, "NEC: Addr=0x%02X, Cmd=0x%02X", address, command);
+    ESP_LOGD(TAG, "NEC: Addr=0x%02X, Cmd=0x%02X", address, command);
     
     if (g_ir_callback != NULL) {
         g_ir_callback(address, command);
@@ -67,7 +67,7 @@ static void ir_parse_nec_code(uint32_t code) {
 // ============ IR Receiver Task ============
 
 static void ir_rx_task(void *pvParameters) {
-    ESP_LOGI(TAG, "IR receiver task started");
+    ESP_LOGD(TAG, "IR receiver task started");
     
     uint8_t last_ir_state = 1;
     int64_t pulse_start_us = esp_timer_get_time();
@@ -141,7 +141,7 @@ static void gpio_init_ir(void) {
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&io_conf_ir);
-    ESP_LOGI(TAG, "IR GPIO initialized (Pin %d)", IR_SENSOR_PIN);
+    ESP_LOGD(TAG, "IR GPIO initialized (Pin %d)", IR_SENSOR_PIN);
 }
 
 // ============ Input Value Handling ============
@@ -153,7 +153,7 @@ void ir_remote_add_digit(uint8_t digit) {
     g_input_value = g_input_value * 10 + digit;
     if (g_input_value > 9999) g_input_value %= 10000;
     
-    ESP_LOGI(TAG, "Input value: %u (mode: %d)", (unsigned int)g_input_value, g_input_mode);
+    ESP_LOGD(TAG, "Input value: %u (mode: %d)", (unsigned int)g_input_value, g_input_mode);
 }
 
 // ============ Public Functions ============
@@ -162,14 +162,14 @@ esp_err_t ir_remote_init(void) {
     gpio_init_ir();
     ir_data = 0;
     ir_bit_count = 0;
-    ESP_LOGI(TAG, "IR remote initialized");
+    ESP_LOGD(TAG, "IR remote initialized");
     return ESP_OK;
 }
 
 void ir_remote_start_task(void) {
     // Priority 5 (LED task 10'dur, onu ezmez), Core 1'e sabitle
     xTaskCreatePinnedToCore(ir_rx_task, "ir_rx_task", 4096, NULL, 5, NULL, 1);
-    ESP_LOGI(TAG, "IR receiver task started (Core 1, Priority 5)");
+    ESP_LOGD(TAG, "IR receiver task started (Core 1, Priority 5)");
 }
 
 void ir_remote_set_callback(ir_command_callback_t callback) {
@@ -184,7 +184,7 @@ void ir_remote_set_input_mode(ir_input_mode_t mode) {
     g_input_mode = mode;
     g_input_value = 0;
     g_input_digit_count = 0;
-    ESP_LOGI(TAG, "Input mode set to %d", mode);
+    ESP_LOGD(TAG, "Input mode set to %d", mode);
 }
 
 void ir_remote_clear_input(void) {

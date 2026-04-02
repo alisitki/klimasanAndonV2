@@ -55,7 +55,7 @@
 
 // ============ WS2812B LED Strip ============
 #define LED_STRIP_GPIO_NUM      26
-#define LED_STRIP_LED_COUNT     107
+#define LED_STRIP_LED_COUNT     108
 #define LED_STRIP_RMT_RES_HZ    10000000  // 10MHz RMT çözünürlüğü
 
 #endif // PIN_CONFIG_H

@@ -62,7 +62,8 @@ uint32_t led_strip_get_cycle_target(void);
 bool led_strip_is_alarm_active(void);
 
 /**
- * @brief Alarmı kapat (IR kumanda ile)
+ * @brief Alarmı kapat
+ * Adet artirma eylemi ile cagrilir
  */
 void led_strip_acknowledge_alarm(void);
 
@@ -80,5 +81,15 @@ void led_strip_set_menu_preview(bool active);
  * @brief Parlaklık seviyesini (1-5) ayarlar
  */
 void led_strip_set_brightness_idx(uint8_t index);
+
+/**
+ * @brief Cycle bar'i dondur (vardiya durdurulunca)
+ */
+void led_strip_pause_cycle(void);
+
+/**
+ * @brief Cycle bar'i devam ettir (vardiya baslatilinca)
+ */
+void led_strip_resume_cycle(void);
 
 #endif // LED_STRIP_H
